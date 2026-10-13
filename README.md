@@ -45,7 +45,17 @@ Win+Space에서 **한본어 입력기**를 선택합니다. 일본어 언어에 
 
 Windows IME의 한자 변환은 Space를 누를 때만 수행합니다. 가나 읽기는 자체적으로 단어를 교정하지 않지만, Microsoft IME가 반환하는 한자 후보에는 엔진의 해석이 반영됩니다. F6로 입력한 가나를 유지할 수 있습니다.
 
-## 빌드·설치
+## 설치
+
+1. [최신 릴리스](https://github.com/MapleYoil/HanBonGo/releases/latest)에서 HanBonGo-windows.zip을 다운로드합니다.
+2. ZIP 파일의 압축을 풉니다.
+3. 압축을 푼 폴더의 **설치.cmd**를 더블클릭합니다.
+4. 관리자 권한 확인 창에서 **예**를 누릅니다.
+5. 완료 안내가 뜨면 **Win + Space**로 한본어 입력기를 선택합니다.
+
+삭제는 시작 메뉴의 **한본어 입력기 → 제거**를 실행합니다.
+
+## 소스 빌드
 
 필요: Windows 10/11 x64, Microsoft 일본어 IME, Visual Studio 2022 C++ 도구, Windows SDK, CMake.
 
@@ -63,7 +73,7 @@ cd HanBonGo
 
 64비트·32비트 DLL과 실행 도구를 `C:\Program Files\HanBonGo\<빌드 해시>`에 설치하고 COM 클래스, TSF 일본어 프로필, 키보드 카테고리를 등록합니다. 입력기 소스가 바뀌면 COM ID도 새로 생성하여 실행 중인 프로그램이 캐시한 이전 입력기와 구분합니다. 이전 프로필을 제거하고 사용자 키보드 목록·기본 입력기·일본어 기본 프로필을 새 버전으로 설정한 뒤 `ActivateProfile`로 전환합니다. 현재 편집 창에도 일본어 입력 언어 변경을 요청합니다. 같은 소스를 재설치할 때는 동일한 ID를 유지합니다. 현재 설치 경로는 `active-install.json`에 기록됩니다. 프로그램 강제 종료나 자동 로그아웃은 하지 않습니다. 입력 언어 변경을 거부하는 프로그램에서는 Win+Space로 새 입력기를 선택합니다.
 
-삭제는 관리자 PowerShell에서 `.\scripts\uninstall-launcher.ps1`을 실행합니다. DLL을 사용하는 앱이 있을 수 있어 설치 파일은 자동 삭제하지 않습니다.
+삭제는 시작 메뉴의 **한본어 입력기 → 제거**를 실행합니다.
 
 ## 검증
 
@@ -91,4 +101,4 @@ $installed = (Get-Content 'C:\Program Files\HanBonGo\active-install.json' -Raw |
 
 업데이트 원본은 https://github.com/MapleYoil/HanBonGo 의 공개 GitHub Releases입니다. 안정 버전 태그(v0.1.1 등)로 릴리스를 만들고 dist/HanBonGo-windows.zip을 자산으로 첨부하면 확인합니다. version.json의 버전과 태그를 맞추어야 합니다. GitHub SHA-256 digest로 다운로드를 검증합니다. 설치에 필요한 Windows 관리자 권한 확인은 표시될 수 있으며, 내부 설치 작업은 숨겨진 PowerShell 설치 도구를 사용합니다.
 
-배포 ZIP에는 32/64비트 입력기 바이너리와 트레이 업데이터가 들어 있습니다. 설치할 PC에는 Visual Studio나 CMake가 필요하지 않으며, Windows에 포함된 .NET Framework 4.8을 사용합니다. ZIP을 풀어 scripts/update.ps1을 실행하면 설치됩니다. 설치된 관리 도구는 Program Files/HanBonGo에 배치되어 원본 소스 폴더 없이 동작합니다.
+배포 ZIP에는 32/64비트 입력기 바이너리와 트레이 업데이터가 들어 있습니다. 설치할 PC에는 Visual Studio나 CMake가 필요하지 않으며, Windows에 포함된 .NET Framework 4.8을 사용합니다. ZIP을 풀어 **설치.cmd**를 더블클릭하면 설치됩니다. 설치된 관리 도구는 Program Files/HanBonGo에 배치되어 원본 소스 폴더 없이 동작합니다.
