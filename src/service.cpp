@@ -1,6 +1,8 @@
 #include <windows.h>
 #include <msctf.h>
 #include <ctffunc.h>
+#include <ctfutb.h>
+#include <olectl.h>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -12,6 +14,53 @@ static const wchar_t* kName=L"한본어 입력기";
 static HINSTANCE module;
 static LONG objects=0;
 template<class T> static void SafeRelease(T*& p){if(p){p->Release();p=nullptr;}}
+// The profile icon labels the switcher; this item supplies the live taskbar icon.
+class InputModeItem final:public ITfLangBarItemButton,public ITfSource {
+ LONG refs=1;ITfLangBarItemSink* sink=nullptr;HWND notifications=nullptr;
+ static LRESULT CALLBACK NotifyProc(HWND window,UINT message,WPARAM w,LPARAM l){
+  auto self=reinterpret_cast<InputModeItem*>(GetWindowLongPtrW(window,GWLP_USERDATA));
+  if(message==WM_NCCREATE){self=static_cast<InputModeItem*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams);SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));}
+  if(message==WM_TIMER&&self){KillTimer(window,w);self->AddRef();if(self->sink)self->sink->OnUpdate(TF_LBI_ICON|TF_LBI_TEXT|TF_LBI_TOOLTIP|TF_LBI_STATUS);self->Release();return 0;}
+  return DefWindowProcW(window,message,w,l);
+ }
+public:
+ InputModeItem(){InterlockedIncrement(&objects);}
+ ~InputModeItem(){if(notifications)DestroyWindow(notifications);SafeRelease(sink);InterlockedDecrement(&objects);}
+ HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void** p) override{
+  if(!p)return E_POINTER;*p=nullptr;
+  if(id==IID_IUnknown||id==IID_ITfLangBarItem||id==IID_ITfLangBarItemButton)*p=static_cast<ITfLangBarItemButton*>(this);
+  else if(id==IID_ITfSource)*p=static_cast<ITfSource*>(this);else return E_NOINTERFACE;
+  AddRef();return S_OK;
+ }
+ ULONG STDMETHODCALLTYPE AddRef() override{return InterlockedIncrement(&refs);}
+ ULONG STDMETHODCALLTYPE Release() override{ULONG r=InterlockedDecrement(&refs);if(!r)delete this;return r;}
+ HRESULT STDMETHODCALLTYPE GetInfo(TF_LANGBARITEMINFO* info) override{
+  if(!info)return E_POINTER;*info={};info->clsidService=kService;info->guidItem=GUID_LBI_INPUTMODE;
+  info->dwStyle=TF_LBI_STYLE_BTN_BUTTON;wcscpy_s(info->szDescription,kName);return S_OK;
+ }
+ HRESULT STDMETHODCALLTYPE GetStatus(DWORD* status) override{if(!status)return E_POINTER;*status=0;return S_OK;}
+ HRESULT STDMETHODCALLTYPE Show(BOOL) override{return S_OK;}
+ HRESULT STDMETHODCALLTYPE GetTooltipString(BSTR* text) override{return GetText(text);}
+ HRESULT STDMETHODCALLTYPE GetText(BSTR* text) override{if(!text)return E_POINTER;*text=SysAllocString(kName);return *text?S_OK:E_OUTOFMEMORY;}
+ HRESULT STDMETHODCALLTYPE GetIcon(HICON* icon) override{
+  if(!icon)return E_POINTER;*icon=static_cast<HICON>(LoadImageW(module,MAKEINTRESOURCEW(101),IMAGE_ICON,GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),0));
+  return *icon?S_OK:HRESULT_FROM_WIN32(GetLastError());
+ }
+ HRESULT STDMETHODCALLTYPE OnClick(TfLBIClick,POINT,const RECT*) override{return S_OK;}
+ HRESULT STDMETHODCALLTYPE InitMenu(ITfMenu*) override{return S_OK;}
+ HRESULT STDMETHODCALLTYPE OnMenuSelect(UINT) override{return S_OK;}
+ HRESULT STDMETHODCALLTYPE AdviseSink(REFIID id,IUnknown* unknown,DWORD* cookie) override{
+  if(!unknown||!cookie)return E_POINTER;if(id!=IID_ITfLangBarItemSink)return CONNECT_E_CANNOTCONNECT;if(sink)return CONNECT_E_ADVISELIMIT;
+  HRESULT hr=unknown->QueryInterface(id,reinterpret_cast<void**>(&sink));if(SUCCEEDED(hr)){*cookie=1;Refresh();}return hr;
+ }
+ HRESULT STDMETHODCALLTYPE UnadviseSink(DWORD cookie) override{if(cookie!=1||!sink)return CONNECT_E_NOCONNECTION;SafeRelease(sink);return S_OK;}
+ void Refresh(){
+  // Finish the TSF/shell focus transition before notifying its UI subscriber.
+  if(!notifications){std::wstring name=std::wstring(L"HanBonGo.IconNotifications.")+kSourceVersion;WNDCLASSW wc{};wc.hInstance=module;wc.lpfnWndProc=NotifyProc;wc.lpszClassName=name.c_str();RegisterClassW(&wc);
+   notifications=CreateWindowExW(0,name.c_str(),L"",0,0,0,0,0,HWND_MESSAGE,nullptr,module,this);}
+  if(notifications){SetTimer(notifications,1,50,nullptr);SetTimer(notifications,2,250,nullptr);}
+ }
+};
 class Service;
 class Edit final:public ITfEditSession {
  LONG refs=1; Service* owner; ITfContext* context;
@@ -24,11 +73,13 @@ public:
  ULONG STDMETHODCALLTYPE Release() override{ULONG r=InterlockedDecrement(&refs);if(!r)delete this;return r;}
  HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie) override;
 };
-class Service final:public ITfTextInputProcessorEx,public ITfKeyEventSink,public ITfCompositionSink,public ITfThreadMgrEventSink {
+class Service final:public ITfTextInputProcessorEx,public ITfKeyEventSink,public ITfCompositionSink,public ITfThreadMgrEventSink,public ITfThreadFocusSink,public ITfInputProcessorProfileActivationSink {
  LONG refs=1;
  ITfThreadMgr* manager=nullptr; TfClientId client=TF_CLIENTID_NULL;
  ITfComposition* composition=nullptr; ITfContext* compositionContext=nullptr;
  DWORD threadCookie=TF_INVALID_COOKIE; bool keyAdvised=false;
+ DWORD focusCookie=TF_INVALID_COOKIE,profileCookie=TF_INVALID_COOKIE;
+ ITfLangBarItemMgr* langBar=nullptr;InputModeItem* inputMode=nullptr;
  std::wstring keys; std::vector<std::wstring> candidates;size_t selected=0;
  hj::Engine engine; HWND popup=nullptr; RECT anchor{};
  bool focused=true;
@@ -92,6 +143,8 @@ public:
   else if(id==IID_ITfKeyEventSink)*p=static_cast<ITfKeyEventSink*>(this);
   else if(id==IID_ITfCompositionSink)*p=static_cast<ITfCompositionSink*>(this);
   else if(id==IID_ITfThreadMgrEventSink)*p=static_cast<ITfThreadMgrEventSink*>(this);
+  else if(id==IID_ITfThreadFocusSink)*p=static_cast<ITfThreadFocusSink*>(this);
+  else if(id==IID_ITfInputProcessorProfileActivationSink)*p=static_cast<ITfInputProcessorProfileActivationSink*>(this);
   else return E_NOINTERFACE;AddRef();return S_OK;
  }
  ULONG STDMETHODCALLTYPE AddRef() override{return InterlockedIncrement(&refs);}
@@ -103,14 +156,26 @@ public:
   if(SUCCEEDED(hr)){hr=km->AdviseKeyEventSink(client,this,TRUE);keyAdvised=SUCCEEDED(hr);km->Release();}
   if(FAILED(hr)){Deactivate();return hr;}
   ITfSource* source=nullptr;hr=manager->QueryInterface(IID_ITfSource,reinterpret_cast<void**>(&source));
-  if(SUCCEEDED(hr)){hr=source->AdviseSink(IID_ITfThreadMgrEventSink,static_cast<ITfThreadMgrEventSink*>(this),&threadCookie);source->Release();}
-  if(FAILED(hr)){Deactivate();return hr;}return S_OK;
+  if(SUCCEEDED(hr)){
+   hr=source->AdviseSink(IID_ITfThreadMgrEventSink,static_cast<ITfThreadMgrEventSink*>(this),&threadCookie);
+   if(SUCCEEDED(hr))hr=source->AdviseSink(IID_ITfThreadFocusSink,static_cast<ITfThreadFocusSink*>(this),&focusCookie);
+   if(SUCCEEDED(hr))hr=source->AdviseSink(IID_ITfInputProcessorProfileActivationSink,static_cast<ITfInputProcessorProfileActivationSink*>(this),&profileCookie);
+   source->Release();}
+  if(FAILED(hr)){Deactivate();return hr;}
+  hr=manager->QueryInterface(IID_ITfLangBarItemMgr,reinterpret_cast<void**>(&langBar));
+  if(SUCCEEDED(hr)){inputMode=new InputModeItem;hr=langBar->AddItem(inputMode);}
+  if(FAILED(hr)){Deactivate();return hr;}inputMode->Refresh();return S_OK;
  }
  HRESULT STDMETHODCALLTYPE Deactivate() override{
+  if(langBar&&inputMode)langBar->RemoveItem(inputMode);
+  SafeRelease(inputMode);SafeRelease(langBar);
   if(manager){FinishFocus();ITfKeystrokeMgr* km=nullptr;if(keyAdvised&&SUCCEEDED(manager->QueryInterface(IID_ITfKeystrokeMgr,reinterpret_cast<void**>(&km)))){km->UnadviseKeyEventSink(client);km->Release();}
-   ITfSource* s=nullptr;if(threadCookie!=TF_INVALID_COOKIE&&SUCCEEDED(manager->QueryInterface(IID_ITfSource,reinterpret_cast<void**>(&s)))){s->UnadviseSink(threadCookie);s->Release();}
+   ITfSource* s=nullptr;if(SUCCEEDED(manager->QueryInterface(IID_ITfSource,reinterpret_cast<void**>(&s)))){
+    if(threadCookie!=TF_INVALID_COOKIE)s->UnadviseSink(threadCookie);
+    if(focusCookie!=TF_INVALID_COOKIE)s->UnadviseSink(focusCookie);
+    if(profileCookie!=TF_INVALID_COOKIE)s->UnadviseSink(profileCookie);s->Release();}
   }
-  SafeRelease(composition);SafeRelease(compositionContext);SafeRelease(manager);client=TF_CLIENTID_NULL;threadCookie=TF_INVALID_COOKIE;keyAdvised=false;Reset();return S_OK;
+  SafeRelease(composition);SafeRelease(compositionContext);SafeRelease(manager);client=TF_CLIENTID_NULL;threadCookie=focusCookie=profileCookie=TF_INVALID_COOKIE;keyAdvised=false;Reset();return S_OK;
  }
  HRESULT Apply(ITfContext* c,TfEditCookie ec,const std::wstring& text,bool finish){
   if(compositionContext&&compositionContext!=c)return E_UNEXPECTED;
@@ -130,7 +195,12 @@ public:
   }
   range->Release();if(SUCCEEDED(hr)){if(finish)Hide();else Show();}return hr;
  }
- HRESULT STDMETHODCALLTYPE OnSetFocus(BOOL yes) override{focused=yes!=FALSE;if(!yes)FinishFocus();return S_OK;}
+ HRESULT STDMETHODCALLTYPE OnSetFocus(BOOL yes) override{focused=yes!=FALSE;if(!yes)FinishFocus();else if(inputMode)inputMode->Refresh();return S_OK;}
+ HRESULT STDMETHODCALLTYPE OnSetThreadFocus() override{focused=true;if(inputMode)inputMode->Refresh();return S_OK;}
+ HRESULT STDMETHODCALLTYPE OnKillThreadFocus() override{focused=false;FinishFocus();return S_OK;}
+ HRESULT STDMETHODCALLTYPE OnActivated(DWORD type,LANGID,REFCLSID clsid,REFGUID,REFGUID profile,HKL,DWORD flags) override{
+  if(type==TF_PROFILETYPE_INPUTPROCESSOR&&clsid==kService&&profile==kProfile&&(flags&TF_IPSINK_FLAG_ACTIVE)&&inputMode)inputMode->Refresh();return S_OK;
+ }
  HRESULT STDMETHODCALLTYPE OnTestKeyDown(ITfContext*,WPARAM k,LPARAM,BOOL* eaten) override{
   bool boundary=!keys.empty()&&k!=VK_SHIFT&&k!=VK_LSHIFT&&k!=VK_RSHIFT&&k!=VK_CONTROL&&k!=VK_MENU&&k!=VK_LWIN&&k!=VK_RWIN;
   *eaten=Wants(static_cast<UINT>(k))||boundary;return S_OK;
@@ -164,7 +234,7 @@ public:
  HRESULT STDMETHODCALLTYPE OnCompositionTerminated(TfEditCookie,ITfComposition* comp) override{if(comp==composition){SafeRelease(composition);SafeRelease(compositionContext);Reset();}return S_OK;}
  HRESULT STDMETHODCALLTYPE OnInitDocumentMgr(ITfDocumentMgr*) override{return S_OK;}
  HRESULT STDMETHODCALLTYPE OnUninitDocumentMgr(ITfDocumentMgr*) override{return S_OK;}
- HRESULT STDMETHODCALLTYPE OnSetFocus(ITfDocumentMgr*,ITfDocumentMgr*) override{FinishFocus();return S_OK;}
+ HRESULT STDMETHODCALLTYPE OnSetFocus(ITfDocumentMgr*,ITfDocumentMgr*) override{FinishFocus();if(inputMode)inputMode->Refresh();return S_OK;}
  HRESULT STDMETHODCALLTYPE OnPushContext(ITfContext*) override{FinishFocus();return S_OK;}
  HRESULT STDMETHODCALLTYPE OnPopContext(ITfContext* c) override{if(c==compositionContext)FinishFocus();return S_OK;}
 };

@@ -4,6 +4,8 @@
 #include <fcntl.h>
 #include <msctf.h>
 #include <shellapi.h>
+#include <ctfutb.h>
+#include <ctffunc.h>
 #include "identity.h"
 int Integration(const wchar_t* path);
 struct LayoutOrTipProfile {
@@ -63,6 +65,24 @@ int wmain(int argc,wchar_t** argv){
    bool compatible=false;if(SUCCEEDED(hr)){TF_INPUTPROCESSORPROFILE profile{};hr=profiles->GetProfile(TF_PROFILETYPE_INPUTPROCESSOR,0x0411,kService,kProfile,nullptr,&profile);compatible=SUCCEEDED(hr)&&(profile.dwCaps&TF_IPP_CAPS_SYSTRAYSUPPORT);profiles->Release();}
    std::wcout<<L"Taskbar branding capability: "<<(compatible?L"yes":L"no")<<L"\n";exitCode=icons&&compatible?0:1;
   }
+ }else if(command==L"--langbar"){
+  ITfThreadMgr* manager=nullptr;TfClientId client=TF_CLIENTID_NULL;
+  HRESULT hr=CoCreateInstance(CLSID_TF_ThreadMgr,nullptr,CLSCTX_INPROC_SERVER,IID_ITfThreadMgr,reinterpret_cast<void**>(&manager));
+  if(SUCCEEDED(hr))hr=manager->Activate(&client);
+  ITfInputProcessorProfileMgr* activeProfiles=nullptr;
+  if(SUCCEEDED(hr))hr=CoCreateInstance(CLSID_TF_InputProcessorProfiles,nullptr,CLSCTX_INPROC_SERVER,IID_ITfInputProcessorProfileMgr,reinterpret_cast<void**>(&activeProfiles));
+  if(SUCCEEDED(hr))hr=activeProfiles->ActivateProfile(TF_PROFILETYPE_INPUTPROCESSOR,0x0411,kService,kProfile,nullptr,TF_IPPMF_FORPROCESS|TF_IPPMF_ENABLEPROFILE);
+  if(activeProfiles)activeProfiles->Release();
+  ITfLangBarItemMgr* items=nullptr;ITfLangBarItem* item=nullptr;ITfLangBarItemButton* button=nullptr;
+  if(SUCCEEDED(hr))hr=manager->QueryInterface(IID_ITfLangBarItemMgr,reinterpret_cast<void**>(&items));
+  if(SUCCEEDED(hr))hr=items->GetItem(GUID_LBI_INPUTMODE,&item);
+  TF_LANGBARITEMINFO info{};if(SUCCEEDED(hr))hr=item->GetInfo(&info);
+  if(SUCCEEDED(hr)&&info.clsidService!=kService)hr=E_FAIL;
+  if(SUCCEEDED(hr))hr=item->QueryInterface(IID_ITfLangBarItemButton,reinterpret_cast<void**>(&button));
+  HICON icon=nullptr;if(SUCCEEDED(hr))hr=button->GetIcon(&icon);
+  std::wcout<<L"Live HanBonGo input-mode item: "<<(SUCCEEDED(hr)&&icon?L"yes":L"no")<<L" (0x"<<std::hex<<hr<<L")\n";
+  exitCode=SUCCEEDED(hr)&&icon?0:1;if(icon)DestroyIcon(icon);if(button)button->Release();if(item)item->Release();if(items)items->Release();
+  if(manager){if(client!=TF_CLIENTID_NULL)manager->Deactivate();manager->Release();}
  }else if(command==L"--user-install"||command==L"--user-uninstall"||command==L"--user-status"){
   exitCode=UserInstall(command!=L"--user-uninstall",command==L"--user-status");
  }else if(command==L"--status"){
