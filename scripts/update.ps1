@@ -43,6 +43,8 @@ if ($LASTEXITCODE -ne 0) { throw 'User keyboard installation failed (InstallLayo
 if ($LASTEXITCODE -ne 0) { throw 'Installed, but automatic keyboard activation failed.' }
 & $newTool --user-status
 if ($LASTEXITCODE -ne 0) { throw 'User keyboard installation verification failed.' }
+& $newTool --refresh-list
+if ($LASTEXITCODE -ne 0) { throw 'Keyboard list refresh failed.' }
 foreach ($architecture in @('x64', 'Win32')) {
     & (Join-Path $newVersion "$architecture\ime-tool.exe") --branding (Join-Path $newVersion "$architecture\HangulJpIME.dll")
     if ($LASTEXITCODE -ne 0) { throw "Keyboard taskbar icon verification failed: $architecture" }

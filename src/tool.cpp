@@ -62,9 +62,30 @@ int wmain(int argc,wchar_t** argv){
    bool icons=extracted>0&&extracted!=UINT_MAX&&largeIcon&&smallIcon;std::wcout<<L"Embedded HB branding icons: "<<(icons?L"yes":L"no")<<L"\n";
    if(largeIcon)DestroyIcon(largeIcon);if(smallIcon)DestroyIcon(smallIcon);
    ITfInputProcessorProfileMgr* profiles=nullptr;HRESULT hr=CoCreateInstance(CLSID_TF_InputProcessorProfiles,nullptr,CLSCTX_INPROC_SERVER,IID_ITfInputProcessorProfileMgr,reinterpret_cast<void**>(&profiles));
-   bool compatible=false;if(SUCCEEDED(hr)){TF_INPUTPROCESSORPROFILE profile{};hr=profiles->GetProfile(TF_PROFILETYPE_INPUTPROCESSOR,0x0411,kService,kProfile,nullptr,&profile);compatible=SUCCEEDED(hr)&&(profile.dwCaps&TF_IPP_CAPS_SYSTRAYSUPPORT);profiles->Release();}
+   bool compatible=false;if(SUCCEEDED(hr)){TF_INPUTPROCESSORPROFILE profile{};hr=profiles->GetProfile(TF_PROFILETYPE_INPUTPROCESSOR,0x0411,kService,kProfile,nullptr,&profile);compatible=SUCCEEDED(hr)&&(profile.dwCaps&TF_IPP_CAPS_SYSTRAYSUPPORT)&&(profile.dwCaps&TF_IPP_CAPS_IMMERSIVESUPPORT);profiles->Release();}
    std::wcout<<L"Taskbar branding capability: "<<(compatible?L"yes":L"no")<<L"\n";exitCode=icons&&compatible?0:1;
   }
+ }else if(command==L"--refresh-list"){
+  DWORD_PTR result=0;
+  SendMessageTimeoutW(HWND_BROADCAST,WM_SETTINGCHANGE,0,reinterpret_cast<LPARAM>(L"intl"),SMTO_ABORTIFHUNG,1000,&result);
+  SendMessageTimeoutW(HWND_BROADCAST,WM_SETTINGCHANGE,0,reinterpret_cast<LPARAM>(L"Keyboard Layout"),SMTO_ABORTIFHUNG,1000,&result);
+  std::wcout<<L"Keyboard list change broadcast sent\n";
+ }else if(command==L"--isolation"){
+  ITfThreadMgr* manager=nullptr;TfClientId client=TF_CLIENTID_NULL;ITfInputProcessorProfileMgr* profiles=nullptr;ITfKeyEventSink* keys=nullptr;
+  HRESULT hr=CoCreateInstance(CLSID_TF_ThreadMgr,nullptr,CLSCTX_INPROC_SERVER,IID_ITfThreadMgr,reinterpret_cast<void**>(&manager));
+  if(SUCCEEDED(hr))hr=manager->Activate(&client);
+  if(SUCCEEDED(hr))hr=CoCreateInstance(CLSID_TF_InputProcessorProfiles,nullptr,CLSCTX_INPROC_SERVER,IID_ITfInputProcessorProfileMgr,reinterpret_cast<void**>(&profiles));
+  if(SUCCEEDED(hr))hr=profiles->ActivateProfile(TF_PROFILETYPE_INPUTPROCESSOR,0x0411,kService,kProfile,nullptr,TF_IPPMF_FORPROCESS|TF_IPPMF_ENABLEPROFILE);
+  if(SUCCEEDED(hr))hr=CoCreateInstance(kService,nullptr,CLSCTX_INPROC_SERVER,IID_ITfKeyEventSink,reinterpret_cast<void**>(&keys));
+  BOOL eaten=FALSE;if(SUCCEEDED(hr)){keys->OnSetFocus(TRUE);hr=keys->OnTestKeyDown(nullptr,'A',0,&eaten);if(SUCCEEDED(hr)&&!eaten)hr=E_FAIL;}
+  // Exercise stale callbacks after a real process-local switch to installed Meltype.
+  const CLSID other={0x417d801b,0xa9bd,0x4c26,{0xbd,0x16,0x35,0x6a,0x82,0x5a,0x69,0x98}};
+  const GUID otherProfile={0x21f643f4,0x72d5,0x4946,{0xbf,0x70,0x0a,0x12,0x6a,0xb5,0x2d,0x05}};
+  if(SUCCEEDED(hr))hr=profiles->ActivateProfile(TF_PROFILETYPE_INPUTPROCESSOR,0x0411,other,otherProfile,nullptr,TF_IPPMF_FORPROCESS|TF_IPPMF_ENABLEPROFILE);
+  if(SUCCEEDED(hr)){eaten=TRUE;hr=keys->OnTestKeyDown(nullptr,'A',0,&eaten);if(SUCCEEDED(hr)&&eaten)hr=E_FAIL;}
+  if(SUCCEEDED(hr)){eaten=TRUE;hr=keys->OnKeyDown(nullptr,'A',0,&eaten);if(SUCCEEDED(hr)&&eaten)hr=E_FAIL;}
+  std::wcout<<L"HanBonGo rejects keys while Meltype is active: "<<(SUCCEEDED(hr)?L"yes":L"no")<<L" (0x"<<std::hex<<hr<<L")\n";exitCode=SUCCEEDED(hr)?0:1;
+  if(keys)keys->Release();if(profiles)profiles->Release();if(manager){if(client!=TF_CLIENTID_NULL)manager->Deactivate();manager->Release();}
  }else if(command==L"--langbar"){
   ITfThreadMgr* manager=nullptr;TfClientId client=TF_CLIENTID_NULL;
   HRESULT hr=CoCreateInstance(CLSID_TF_ThreadMgr,nullptr,CLSCTX_INPROC_SERVER,IID_ITfThreadMgr,reinterpret_cast<void**>(&manager));

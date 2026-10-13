@@ -97,7 +97,7 @@ $installed = (Get-Content 'C:\Program Files\HanBonGo\active-install.json' -Raw |
 
 설정 창은 없고 트레이 우클릭 메뉴에서 직접 Windows 시작 시 실행, 확인 주기(30분·1시간·3시간·6시간·12시간·하루), 새 버전 알림, 자동 설치를 변경합니다. 기본 주기는 6시간, 알림은 켜짐, 자동 설치는 꺼짐입니다. 새 버전 알림을 누르면 설치를 시작합니다. 크레딧 하위 메뉴에는 개발자 MapleYoil, Microsoft 일본어 IME, 클릭하면 브라우저로 여는 GitHub 주소를 표시합니다.
 
-설정은 사용자 LocalAppData/HanBonGo/settings.json에 저장되고 로그는 같은 폴더의 updater.log에 기록됩니다. 시작 실행을 끈 선택은 다음 업데이트에서도 유지합니다. 이미 실행 중인 업데이터를 시작 메뉴에서 다시 열면 중복 실행 대신 우클릭 메뉴를 표시합니다. 종료는 입력기가 아닌 업데이터만 종료합니다.
+설정은 사용자 LocalAppData/HanBonGo/settings.json에 저장되고 로그는 같은 폴더의 updater.log에 기록됩니다. 시작 실행을 끈 선택은 다음 업데이트에서도 유지합니다. 메뉴는 트레이 아이콘을 우클릭할 때만 열립니다. 수동 실행이나 더블클릭으로 메뉴가 열리지 않으며, 이미 실행 중이면 추가 실행은 종료됩니다. 종료는 입력기가 아닌 업데이터만 종료합니다.
 
 업데이트 원본은 https://github.com/MapleYoil/HanBonGo 의 공개 GitHub Releases입니다. 안정 버전 태그(v0.1.1 등)로 릴리스를 만들고 dist/HanBonGo-windows.zip을 자산으로 첨부하면 확인합니다. version.json의 버전과 태그를 맞추어야 합니다. GitHub SHA-256 digest로 다운로드를 검증합니다. 설치에 필요한 Windows 관리자 권한 확인은 표시될 수 있으며, 내부 설치 작업은 숨겨진 PowerShell 설치 도구를 사용합니다.
 

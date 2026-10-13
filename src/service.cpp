@@ -14,13 +14,19 @@ static const wchar_t* kName=L"한본어 입력기";
 static HINSTANCE module;
 static LONG objects=0;
 template<class T> static void SafeRelease(T*& p){if(p){p->Release();p=nullptr;}}
+static bool IsHanBonGoActive(){
+ ITfInputProcessorProfileMgr* profiles=nullptr;TF_INPUTPROCESSORPROFILE profile{};
+ HRESULT hr=CoCreateInstance(CLSID_TF_InputProcessorProfiles,nullptr,CLSCTX_INPROC_SERVER,IID_ITfInputProcessorProfileMgr,reinterpret_cast<void**>(&profiles));
+ if(SUCCEEDED(hr)){hr=profiles->GetActiveProfile(GUID_TFCAT_TIP_KEYBOARD,&profile);profiles->Release();}
+ return SUCCEEDED(hr)&&profile.dwProfileType==TF_PROFILETYPE_INPUTPROCESSOR&&profile.clsid==kService&&profile.guidProfile==kProfile;
+}
 // The profile icon labels the switcher; this item supplies the live taskbar icon.
 class InputModeItem final:public ITfLangBarItemButton,public ITfSource {
- LONG refs=1;ITfLangBarItemSink* sink=nullptr;HWND notifications=nullptr;
+ LONG refs=1;ITfLangBarItemSink* sink=nullptr;HWND notifications=nullptr;bool active=true;
  static LRESULT CALLBACK NotifyProc(HWND window,UINT message,WPARAM w,LPARAM l){
   auto self=reinterpret_cast<InputModeItem*>(GetWindowLongPtrW(window,GWLP_USERDATA));
   if(message==WM_NCCREATE){self=static_cast<InputModeItem*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams);SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));}
-  if(message==WM_TIMER&&self){KillTimer(window,w);self->AddRef();if(self->sink)self->sink->OnUpdate(TF_LBI_ICON|TF_LBI_TEXT|TF_LBI_TOOLTIP|TF_LBI_STATUS);self->Release();return 0;}
+  if(message==WM_APP+1&&self){self->AddRef();if(self->sink&&self->active)self->sink->OnUpdate(TF_LBI_ICON|TF_LBI_TEXT|TF_LBI_TOOLTIP|TF_LBI_STATUS);self->Release();return 0;}
   return DefWindowProcW(window,message,w,l);
  }
 public:
@@ -36,9 +42,9 @@ public:
  ULONG STDMETHODCALLTYPE Release() override{ULONG r=InterlockedDecrement(&refs);if(!r)delete this;return r;}
  HRESULT STDMETHODCALLTYPE GetInfo(TF_LANGBARITEMINFO* info) override{
   if(!info)return E_POINTER;*info={};info->clsidService=kService;info->guidItem=GUID_LBI_INPUTMODE;
-  info->dwStyle=TF_LBI_STYLE_BTN_BUTTON;wcscpy_s(info->szDescription,kName);return S_OK;
+  info->dwStyle=TF_LBI_STYLE_BTN_BUTTON|TF_LBI_STYLE_HIDDENSTATUSCONTROL;wcscpy_s(info->szDescription,kName);return S_OK;
  }
- HRESULT STDMETHODCALLTYPE GetStatus(DWORD* status) override{if(!status)return E_POINTER;*status=0;return S_OK;}
+ HRESULT STDMETHODCALLTYPE GetStatus(DWORD* status) override{if(!status)return E_POINTER;*status=active?0:TF_LBI_STATUS_HIDDEN;return S_OK;}
  HRESULT STDMETHODCALLTYPE Show(BOOL) override{return S_OK;}
  HRESULT STDMETHODCALLTYPE GetTooltipString(BSTR* text) override{return GetText(text);}
  HRESULT STDMETHODCALLTYPE GetText(BSTR* text) override{if(!text)return E_POINTER;*text=SysAllocString(kName);return *text?S_OK:E_OUTOFMEMORY;}
@@ -54,11 +60,12 @@ public:
   HRESULT hr=unknown->QueryInterface(id,reinterpret_cast<void**>(&sink));if(SUCCEEDED(hr)){*cookie=1;Refresh();}return hr;
  }
  HRESULT STDMETHODCALLTYPE UnadviseSink(DWORD cookie) override{if(cookie!=1||!sink)return CONNECT_E_NOCONNECTION;SafeRelease(sink);return S_OK;}
+ void SetActive(bool value){active=value;if(value)Refresh();else if(sink)sink->OnUpdate(TF_LBI_STATUS);}
  void Refresh(){
-  // Finish the TSF/shell focus transition before notifying its UI subscriber.
+  // Recheck on the next message dispatch, with no timed delay.
   if(!notifications){std::wstring name=std::wstring(L"HanBonGo.IconNotifications.")+kSourceVersion;WNDCLASSW wc{};wc.hInstance=module;wc.lpfnWndProc=NotifyProc;wc.lpszClassName=name.c_str();RegisterClassW(&wc);
    notifications=CreateWindowExW(0,name.c_str(),L"",0,0,0,0,0,HWND_MESSAGE,nullptr,module,this);}
-  if(notifications){SetTimer(notifications,1,50,nullptr);SetTimer(notifications,2,250,nullptr);}
+  if(notifications)PostMessageW(notifications,WM_APP+1,0,0);
  }
 };
 class Service;
@@ -73,16 +80,17 @@ public:
  ULONG STDMETHODCALLTYPE Release() override{ULONG r=InterlockedDecrement(&refs);if(!r)delete this;return r;}
  HRESULT STDMETHODCALLTYPE DoEditSession(TfEditCookie) override;
 };
-class Service final:public ITfTextInputProcessorEx,public ITfKeyEventSink,public ITfCompositionSink,public ITfThreadMgrEventSink,public ITfThreadFocusSink,public ITfInputProcessorProfileActivationSink {
+class Service final:public ITfTextInputProcessorEx,public ITfKeyEventSink,public ITfCompositionSink,public ITfThreadMgrEventSink,public ITfThreadFocusSink,public ITfInputProcessorProfileActivationSink,public ITfActiveLanguageProfileNotifySink {
  LONG refs=1;
  ITfThreadMgr* manager=nullptr; TfClientId client=TF_CLIENTID_NULL;
  ITfComposition* composition=nullptr; ITfContext* compositionContext=nullptr;
  DWORD threadCookie=TF_INVALID_COOKIE; bool keyAdvised=false;
  DWORD focusCookie=TF_INVALID_COOKIE,profileCookie=TF_INVALID_COOKIE;
+ DWORD languageCookie=TF_INVALID_COOKIE;
  ITfLangBarItemMgr* langBar=nullptr;InputModeItem* inputMode=nullptr;
  std::wstring keys; std::vector<std::wstring> candidates;size_t selected=0;
  hj::Engine engine; HWND popup=nullptr; RECT anchor{};
- bool focused=true;
+ bool focused=true;bool keyForeground=false;
  static LRESULT CALLBACK WindowProc(HWND h,UINT m,WPARAM w,LPARAM l){
   auto self=reinterpret_cast<Service*>(GetWindowLongPtrW(h,GWLP_USERDATA));
   if(m==WM_NCCREATE){self=static_cast<Service*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));}
@@ -145,6 +153,7 @@ public:
   else if(id==IID_ITfThreadMgrEventSink)*p=static_cast<ITfThreadMgrEventSink*>(this);
   else if(id==IID_ITfThreadFocusSink)*p=static_cast<ITfThreadFocusSink*>(this);
   else if(id==IID_ITfInputProcessorProfileActivationSink)*p=static_cast<ITfInputProcessorProfileActivationSink*>(this);
+  else if(id==IID_ITfActiveLanguageProfileNotifySink)*p=static_cast<ITfActiveLanguageProfileNotifySink*>(this);
   else return E_NOINTERFACE;AddRef();return S_OK;
  }
  ULONG STDMETHODCALLTYPE AddRef() override{return InterlockedIncrement(&refs);}
@@ -160,6 +169,7 @@ public:
    hr=source->AdviseSink(IID_ITfThreadMgrEventSink,static_cast<ITfThreadMgrEventSink*>(this),&threadCookie);
    if(SUCCEEDED(hr))hr=source->AdviseSink(IID_ITfThreadFocusSink,static_cast<ITfThreadFocusSink*>(this),&focusCookie);
    if(SUCCEEDED(hr))hr=source->AdviseSink(IID_ITfInputProcessorProfileActivationSink,static_cast<ITfInputProcessorProfileActivationSink*>(this),&profileCookie);
+   if(SUCCEEDED(hr))hr=source->AdviseSink(IID_ITfActiveLanguageProfileNotifySink,static_cast<ITfActiveLanguageProfileNotifySink*>(this),&languageCookie);
    source->Release();}
   if(FAILED(hr)){Deactivate();return hr;}
   hr=manager->QueryInterface(IID_ITfLangBarItemMgr,reinterpret_cast<void**>(&langBar));
@@ -173,9 +183,10 @@ public:
    ITfSource* s=nullptr;if(SUCCEEDED(manager->QueryInterface(IID_ITfSource,reinterpret_cast<void**>(&s)))){
     if(threadCookie!=TF_INVALID_COOKIE)s->UnadviseSink(threadCookie);
     if(focusCookie!=TF_INVALID_COOKIE)s->UnadviseSink(focusCookie);
-    if(profileCookie!=TF_INVALID_COOKIE)s->UnadviseSink(profileCookie);s->Release();}
+    if(profileCookie!=TF_INVALID_COOKIE)s->UnadviseSink(profileCookie);
+    if(languageCookie!=TF_INVALID_COOKIE)s->UnadviseSink(languageCookie);s->Release();}
   }
-  SafeRelease(composition);SafeRelease(compositionContext);SafeRelease(manager);client=TF_CLIENTID_NULL;threadCookie=focusCookie=profileCookie=TF_INVALID_COOKIE;keyAdvised=false;Reset();return S_OK;
+  SafeRelease(composition);SafeRelease(compositionContext);SafeRelease(manager);client=TF_CLIENTID_NULL;threadCookie=focusCookie=profileCookie=languageCookie=TF_INVALID_COOKIE;keyAdvised=false;keyForeground=false;Reset();return S_OK;
  }
  HRESULT Apply(ITfContext* c,TfEditCookie ec,const std::wstring& text,bool finish){
   if(compositionContext&&compositionContext!=c)return E_UNEXPECTED;
@@ -195,13 +206,21 @@ public:
   }
   range->Release();if(SUCCEEDED(hr)){if(finish)Hide();else Show();}return hr;
  }
- HRESULT STDMETHODCALLTYPE OnSetFocus(BOOL yes) override{focused=yes!=FALSE;if(!yes)FinishFocus();else if(inputMode)inputMode->Refresh();return S_OK;}
+ HRESULT STDMETHODCALLTYPE OnSetFocus(BOOL yes) override{keyForeground=yes!=FALSE;focused=yes!=FALSE;if(!yes)FinishFocus();else if(inputMode)inputMode->SetActive(true);return S_OK;}
  HRESULT STDMETHODCALLTYPE OnSetThreadFocus() override{focused=true;if(inputMode)inputMode->Refresh();return S_OK;}
  HRESULT STDMETHODCALLTYPE OnKillThreadFocus() override{focused=false;FinishFocus();return S_OK;}
- HRESULT STDMETHODCALLTYPE OnActivated(DWORD type,LANGID,REFCLSID clsid,REFGUID,REFGUID profile,HKL,DWORD flags) override{
-  if(type==TF_PROFILETYPE_INPUTPROCESSOR&&clsid==kService&&profile==kProfile&&(flags&TF_IPSINK_FLAG_ACTIVE)&&inputMode)inputMode->Refresh();return S_OK;
+ HRESULT STDMETHODCALLTYPE OnActivated(DWORD type,LANGID,REFCLSID clsid,REFGUID category,REFGUID profile,HKL,DWORD flags) override{
+  if(category!=GUID_TFCAT_TIP_KEYBOARD)return S_OK;
+  if(flags&TF_IPSINK_FLAG_ACTIVE){
+   if(type==TF_PROFILETYPE_INPUTPROCESSOR&&clsid==kService&&profile==kProfile){if(inputMode)inputMode->SetActive(true);}
+   else {keyForeground=false;if(inputMode)inputMode->SetActive(false);FinishFocus();}
+  }else if(clsid==kService&&profile==kProfile){keyForeground=false;if(inputMode)inputMode->SetActive(false);FinishFocus();}return S_OK;
+ }
+ HRESULT STDMETHODCALLTYPE OnActivated(REFCLSID clsid,REFGUID profile,BOOL yes) override{
+  if(clsid==kService&&profile==kProfile){if(inputMode)inputMode->SetActive(yes!=FALSE);if(!yes){keyForeground=false;FinishFocus();}}return S_OK;
  }
  HRESULT STDMETHODCALLTYPE OnTestKeyDown(ITfContext*,WPARAM k,LPARAM,BOOL* eaten) override{
+  if(!keyForeground||!IsHanBonGoActive()){*eaten=FALSE;return S_OK;}
   bool boundary=!keys.empty()&&k!=VK_SHIFT&&k!=VK_LSHIFT&&k!=VK_RSHIFT&&k!=VK_CONTROL&&k!=VK_MENU&&k!=VK_LWIN&&k!=VK_RWIN;
   *eaten=Wants(static_cast<UINT>(k))||boundary;return S_OK;
  }
@@ -210,6 +229,7 @@ public:
  HRESULT STDMETHODCALLTYPE OnPreservedKey(ITfContext*,REFGUID,BOOL* eaten) override{*eaten=FALSE;return S_OK;}
  HRESULT STDMETHODCALLTYPE OnKeyDown(ITfContext* c,WPARAM key,LPARAM,BOOL* eaten) override{
   UINT k=static_cast<UINT>(key);*eaten=FALSE;
+  if(!keyForeground||!IsHanBonGoActive())return S_OK;
   if(!Wants(k)){if(!keys.empty())Finish(c);return S_OK;}
   auto oldKeys=keys;auto oldCandidates=candidates;auto oldSelected=selected;HRESULT hr=S_OK;
   if(k==VK_RETURN)hr=Finish(c);
@@ -263,18 +283,17 @@ extern "C" HRESULT WINAPI DllRegisterServer(){
  if(error==ERROR_SUCCESS)error=RegSetValueExW(key,L"ThreadingModel",0,REG_SZ,reinterpret_cast<const BYTE*>(L"Apartment"),sizeof(L"Apartment"));RegCloseKey(key);
  if(error!=ERROR_SUCCESS)return HRESULT_FROM_WIN32(error);
  HRESULT init=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);if(FAILED(init)&&init!=RPC_E_CHANGED_MODE)return init;
- ITfInputProcessorProfiles* profiles=nullptr;HRESULT hr=CoCreateInstance(CLSID_TF_InputProcessorProfiles,nullptr,CLSCTX_INPROC_SERVER,IID_ITfInputProcessorProfiles,reinterpret_cast<void**>(&profiles));
- if(SUCCEEDED(hr)){hr=profiles->Register(kService);if(SUCCEEDED(hr))hr=profiles->AddLanguageProfile(kService,0x0411,kProfile,kName,static_cast<ULONG>(wcslen(kName)),path,length,static_cast<ULONG>(-101));
-  if(SUCCEEDED(hr))hr=profiles->EnableLanguageProfile(kService,0x0411,kProfile,TRUE);profiles->Release();}
+ ITfInputProcessorProfileMgr* profiles=nullptr;HRESULT hr=CoCreateInstance(CLSID_TF_InputProcessorProfiles,nullptr,CLSCTX_INPROC_SERVER,IID_ITfInputProcessorProfileMgr,reinterpret_cast<void**>(&profiles));
+ if(SUCCEEDED(hr)){hr=profiles->RegisterProfile(kService,0x0411,kProfile,kName,static_cast<ULONG>(wcslen(kName)),path,length,static_cast<ULONG>(-101),nullptr,0,TRUE,0);profiles->Release();}
  ITfCategoryMgr* categories=nullptr;if(SUCCEEDED(hr))hr=CoCreateInstance(CLSID_TF_CategoryMgr,nullptr,CLSCTX_INPROC_SERVER,IID_ITfCategoryMgr,reinterpret_cast<void**>(&categories));
- if(SUCCEEDED(hr)){hr=categories->RegisterCategory(kService,GUID_TFCAT_TIP_KEYBOARD,kService);if(SUCCEEDED(hr))hr=categories->RegisterCategory(kService,GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,kService);categories->Release();}
+ if(SUCCEEDED(hr)){hr=categories->RegisterCategory(kService,GUID_TFCAT_TIP_KEYBOARD,kService);if(SUCCEEDED(hr))hr=categories->RegisterCategory(kService,GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,kService);if(SUCCEEDED(hr))hr=categories->RegisterCategory(kService,GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,kService);categories->Release();}
  if(SUCCEEDED(init))CoUninitialize();if(FAILED(hr))RegDeleteTreeW(HKEY_LOCAL_MACHINE,cls.c_str());return hr;
 }
 extern "C" HRESULT WINAPI DllUnregisterServer(){
  HRESULT init=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);if(FAILED(init)&&init!=RPC_E_CHANGED_MODE)return init;
  HRESULT result=S_OK;ITfInputProcessorProfiles* p=nullptr;HRESULT hr=CoCreateInstance(CLSID_TF_InputProcessorProfiles,nullptr,CLSCTX_INPROC_SERVER,IID_ITfInputProcessorProfiles,reinterpret_cast<void**>(&p));
  if(SUCCEEDED(hr)){hr=p->RemoveLanguageProfile(kService,0x0411,kProfile);if(FAILED(hr))result=hr;hr=p->Unregister(kService);if(FAILED(hr))result=hr;p->Release();}else result=hr;
- ITfCategoryMgr* c=nullptr;if(SUCCEEDED(CoCreateInstance(CLSID_TF_CategoryMgr,nullptr,CLSCTX_INPROC_SERVER,IID_ITfCategoryMgr,reinterpret_cast<void**>(&c)))){c->UnregisterCategory(kService,GUID_TFCAT_TIP_KEYBOARD,kService);c->UnregisterCategory(kService,GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,kService);c->Release();}
+ ITfCategoryMgr* c=nullptr;if(SUCCEEDED(CoCreateInstance(CLSID_TF_CategoryMgr,nullptr,CLSCTX_INPROC_SERVER,IID_ITfCategoryMgr,reinterpret_cast<void**>(&c)))){c->UnregisterCategory(kService,GUID_TFCAT_TIP_KEYBOARD,kService);c->UnregisterCategory(kService,GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,kService);c->UnregisterCategory(kService,GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,kService);c->Release();}
  LSTATUS error=RegDeleteTreeW(HKEY_LOCAL_MACHINE,ClassKey().c_str());if(error!=ERROR_SUCCESS&&error!=ERROR_FILE_NOT_FOUND)result=HRESULT_FROM_WIN32(error);
  if(SUCCEEDED(init))CoUninitialize();return result;
 }

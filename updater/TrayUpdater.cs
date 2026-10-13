@@ -159,14 +159,11 @@ namespace HanBonGo {
     }
     sealed class TrayContext : ApplicationContext {
         readonly NotifyIcon tray; readonly System.Windows.Forms.Timer timer; readonly Control dispatcher;
-        readonly EventWaitHandle showSettings; readonly RegisteredWaitHandle showWait;
         readonly EventWaitHandle shutdown; readonly RegisteredWaitHandle shutdownWait;
         Settings settings; Release pending; Asset pendingAsset; bool busy;
         string status = "업데이트 확인을 준비하고 있습니다.";
         public TrayContext() {
             settings = Settings.Load(); dispatcher = new Control(); dispatcher.CreateControl();
-            showSettings = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\HanBonGoShowSettings");
-            showWait = ThreadPool.RegisterWaitForSingleObject(showSettings, (state, timeout) => { try { dispatcher.BeginInvoke((Action)OpenSettings); } catch { } }, null, Timeout.Infinite, false);
             shutdown = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\HanBonGoExit");
             shutdownWait = ThreadPool.RegisterWaitForSingleObject(shutdown, (state, timeout) => { try { dispatcher.BeginInvoke((Action)ExitThread); } catch { } }, null, Timeout.Infinite, false);
             var menu = TrayMenu.Create(() => settings, () => status,
@@ -176,7 +173,7 @@ namespace HanBonGo {
                 enabled => { if (Change(next => next.AutoInstall = enabled) && enabled && pending != null) dispatcher.BeginInvoke((Action)(async () => await Install())); },
                 ExitThread);
             tray = new NotifyIcon { Icon = MakeIcon(), Text = "한본어 입력기 업데이터", ContextMenuStrip = menu, Visible = true };
-            tray.DoubleClick += (s, e) => OpenSettings(); tray.BalloonTipClicked += async (s, e) => { if (pending != null && !busy) await Install(); };
+            tray.BalloonTipClicked += async (s, e) => { if (pending != null && !busy) await Install(); };
             timer = new System.Windows.Forms.Timer(); timer.Interval = settings.IntervalMinutes * 60000; timer.Tick += async (s, e) => await Check(); timer.Start();
             var first = new System.Windows.Forms.Timer { Interval = 3000 }; first.Tick += async (s, e) => { first.Stop(); first.Dispose(); await Check(); }; first.Start();
             Paths.Log("Tray updater started.");
@@ -189,9 +186,6 @@ namespace HanBonGo {
                 g.DrawString("↑", font, Brushes.White, new RectangleF(0, 2, 32, 28), new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
                 IntPtr h = bitmap.GetHicon(); var icon = (Icon)Icon.FromHandle(h).Clone(); DestroyIcon(h); return icon;
             }
-        }
-        public void OpenSettings() {
-            tray.ContextMenuStrip.Show(Cursor.Position);
         }
         bool Change(Action<Settings> edit) {
             try {
@@ -224,7 +218,7 @@ namespace HanBonGo {
             catch (Exception e) { status = "업데이트를 설치하지 못했습니다."; Paths.Log("Install failed: " + e.Message); Balloon("한본어 입력기", status + " 관리자 권한 확인을 완료했는지 확인해주세요.", ToolTipIcon.Warning); }
             finally { busy = false; }
         }
-        protected override void ExitThreadCore() { timer.Stop(); timer.Dispose(); showWait.Unregister(null); shutdownWait.Unregister(null); showSettings.Dispose(); shutdown.Dispose(); tray.Visible = false; tray.Icon.Dispose(); tray.ContextMenuStrip.Dispose(); tray.Dispose(); dispatcher.Dispose(); base.ExitThreadCore(); }
+        protected override void ExitThreadCore() { timer.Stop(); timer.Dispose(); shutdownWait.Unregister(null); shutdown.Dispose(); tray.Visible = false; tray.Icon.Dispose(); tray.ContextMenuStrip.Dispose(); tray.Dispose(); dispatcher.Dispose(); base.ExitThreadCore(); }
     }
     static class Program {
         [STAThread] static int Main(string[] args) {
@@ -241,7 +235,7 @@ namespace HanBonGo {
             if (args.Length >= 2 && args[0] == "--self-test") return SelfTest(args[1]);
             bool owned; using (var mutex = new Mutex(true, @"Local\HanBonGoTrayUpdater", out owned)) {
                 if (!owned && args.Contains("--replace")) { try { owned = mutex.WaitOne(10000); } catch (AbandonedMutexException) { owned = true; } }
-                if (!owned) { if (!args.Contains("--startup")) try { using (var request = EventWaitHandle.OpenExisting(@"Local\HanBonGoShowSettings")) request.Set(); } catch { } return 0; }
+                if (!owned) return 0;
                 try { using (var app = new TrayContext()) Application.Run(app); } catch (Exception e) { Paths.Log("Tray failure: " + e.ToString()); return 1; } finally { mutex.ReleaseMutex(); }
             } return 0;
         }
