@@ -1,6 +1,7 @@
 #pragma code_page(65001)
 #include <windows.h>
 101 ICON "@CMAKE_CURRENT_SOURCE_DIR@/src/resources/HanBonGo.ico"
+102 RCDATA "@CMAKE_CURRENT_SOURCE_DIR@/src/resources/fonts/PretendardJP-Regular.ttf"
 1 VERSIONINFO
 FILEVERSION 0,1,0,0
 PRODUCTVERSION 0,1,0,0

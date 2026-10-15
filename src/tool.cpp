@@ -96,16 +96,27 @@ int wmain(int argc,wchar_t** argv){
   if(activeProfiles)activeProfiles->Release();
   ITfLangBarItemMgr* items=nullptr;ITfLangBarItem* item=nullptr;ITfLangBarItemButton* button=nullptr;
   if(SUCCEEDED(hr))hr=manager->QueryInterface(IID_ITfLangBarItemMgr,reinterpret_cast<void**>(&items));
-  if(SUCCEEDED(hr))hr=items->GetItem(GUID_LBI_INPUTMODE,&item);
+  if(SUCCEEDED(hr)){hr=items->GetItem(GUID_LBI_INPUTMODE,&item);if(SUCCEEDED(hr)&&!item)hr=E_FAIL;}
   TF_LANGBARITEMINFO info{};if(SUCCEEDED(hr))hr=item->GetInfo(&info);
   if(SUCCEEDED(hr)&&info.clsidService!=kService)hr=E_FAIL;
   if(SUCCEEDED(hr))hr=item->QueryInterface(IID_ITfLangBarItemButton,reinterpret_cast<void**>(&button));
-  HICON icon=nullptr;if(SUCCEEDED(hr))hr=button->GetIcon(&icon);
+  HICON icon=nullptr;if(SUCCEEDED(hr)&&button)hr=button->GetIcon(&icon);
   std::wcout<<L"Live HanBonGo input-mode item: "<<(SUCCEEDED(hr)&&icon?L"yes":L"no")<<L" (0x"<<std::hex<<hr<<L")\n";
   exitCode=SUCCEEDED(hr)&&icon?0:1;if(icon)DestroyIcon(icon);if(button)button->Release();if(item)item->Release();if(items)items->Release();
   if(manager){if(client!=TF_CLIENTID_NULL)manager->Deactivate();manager->Release();}
  }else if(command==L"--user-install"||command==L"--user-uninstall"||command==L"--user-status"){
   exitCode=UserInstall(command!=L"--user-uninstall",command==L"--user-status");
+ }else if(command==L"--default-profile"){
+  wchar_t* end=nullptr;unsigned long language=argc==3?wcstoul(argv[2],&end,16):0;
+  if(argc!=3||!language||language>0xffff||end==argv[2]||*end)exitCode=2;
+  else {
+   ITfInputProcessorProfiles* profiles=nullptr;CLSID service{};GUID profile{};
+   HRESULT hr=CoCreateInstance(CLSID_TF_InputProcessorProfiles,nullptr,CLSCTX_INPROC_SERVER,IID_ITfInputProcessorProfiles,reinterpret_cast<void**>(&profiles));
+   if(SUCCEEDED(hr)){hr=profiles->GetDefaultLanguageProfile(static_cast<LANGID>(language),GUID_TFCAT_TIP_KEYBOARD,&service,&profile);profiles->Release();}
+   if(hr==S_OK){wchar_t serviceId[40],profileId[40];StringFromGUID2(service,serviceId,40);StringFromGUID2(profile,profileId,40);std::wcout<<serviceId<<L"\n"<<profileId<<L"\n";}
+   else std::wcerr<<L"Default keyboard profile: 0x"<<std::hex<<hr<<L"\n";
+   exitCode=hr==S_OK?0:1;
+  }
  }else if(command==L"--status"){
   ITfInputProcessorProfileMgr* profiles=nullptr;HRESULT hr=CoCreateInstance(CLSID_TF_InputProcessorProfiles,nullptr,CLSCTX_INPROC_SERVER,IID_ITfInputProcessorProfileMgr,reinterpret_cast<void**>(&profiles));
   if(SUCCEEDED(hr)){TF_INPUTPROCESSORPROFILE active{};hr=profiles->GetActiveProfile(GUID_TFCAT_TIP_KEYBOARD,&active);if(SUCCEEDED(hr)){wchar_t id[40];StringFromGUID2(active.clsid,id,40);std::wcout<<L"Active keyboard: "<<id<<L"\n";if(active.clsid!=kService)hr=E_FAIL;}profiles->Release();}
@@ -119,7 +130,7 @@ int wmain(int argc,wchar_t** argv){
     hr=profiles->QueryInterface(IID_ITfInputProcessorProfiles,reinterpret_cast<void**>(&languages));
     if(SUCCEEDED(hr)){
      hr=languages->EnableLanguageProfile(kService,0x0411,kProfile,TRUE);
-     if(SUCCEEDED(hr))hr=languages->SetDefaultLanguageProfile(0x0411,kService,kProfile);
+     // Selecting the keyboard must preserve the user's language default.
      if(SUCCEEDED(hr))hr=languages->ChangeCurrentLanguage(0x0411);
      languages->Release();
     }

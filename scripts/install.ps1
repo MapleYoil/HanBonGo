@@ -49,6 +49,11 @@ if ($previousVersion -and $previousVersion -ne $versionRoot) {
     }
 }
 $manifest = Get-Content -LiteralPath (Join-Path $projectRoot 'version.json') -Raw | ConvertFrom-Json
+$fontLicense = Join-Path $projectRoot 'licenses\PretendardJP-LICENSE.txt'
+if (-not (Test-Path -LiteralPath $fontLicense)) { $fontLicense = Join-Path $projectRoot 'src\resources\fonts\LICENSE.txt' }
+$licenseDestination = Join-Path $versionRoot 'licenses'
+New-Item -ItemType Directory -Force -Path $licenseDestination | Out-Null
+Copy-Item -LiteralPath $fontLicense -Destination (Join-Path $licenseDestination 'PretendardJP-LICENSE.txt') -Force
 $updaterDestination = Join-Path $versionRoot 'updater'
 New-Item -ItemType Directory -Force -Path $updaterDestination | Out-Null
 foreach ($file in (Get-ChildItem -LiteralPath (Join-Path $projectRoot 'build\updater') -File | Where-Object { $_.Name -match '^HanBonGo\.Updater\.exe' })) {

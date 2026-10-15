@@ -11,7 +11,10 @@ foreach ($architecture in @('x64', 'Win32')) {
     & ctest --test-dir $buildPath -C Release --output-on-failure
     if ($LASTEXITCODE -ne 0) { throw "Tests failed: $architecture" }
 }
+& (Join-Path $PSScriptRoot 'test-runtime.ps1')
 & (Join-Path $PSScriptRoot 'build-updater.ps1')
 & (Join-Path $PSScriptRoot 'test-updater.ps1')
+& (Join-Path $PSScriptRoot 'test-input-preferences.ps1')
+& (Join-Path $PSScriptRoot 'test-uninstall.ps1')
 & (Join-Path $PSScriptRoot 'package.ps1')
 if (-not $SkipInstall) { & (Join-Path $PSScriptRoot 'update.ps1') }

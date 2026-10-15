@@ -2,7 +2,9 @@
 
 The user requires every input-method update to be automatically reinstalled.
 After code changes run `scripts/build.ps1`: it builds and tests x64/Win32, then
-invokes `scripts/update.ps1` to install and activate the new keyboard profile.
+invokes `scripts/update.ps1` to install the new keyboard profile. Preserve the
+user's default input method, language order, and other keyboards. Do not select
+HanBonGo automatically during installation, updates, or Windows startup.
 Use `-SkipInstall` only for intermediate diagnostics, not final delivery.
 Do not tell the user an update is applied based only on changed registry paths.
 Keep release-specific COM identities to avoid old DLL/class-factory caches.

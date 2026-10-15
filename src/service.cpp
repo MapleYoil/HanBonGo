@@ -8,9 +8,11 @@
 #include <algorithm>
 #include "core.h"
 #include "identity.h"
+#include "live_candidates.h"
 
 // Stable identities shared by the x86 and x64 builds.
 static const wchar_t* kName=L"한본어 입력기";
+// Candidate conversion keeps this registered HanBonGo profile active.
 static HINSTANCE module;
 static LONG objects=0;
 template<class T> static void SafeRelease(T*& p){if(p){p->Release();p=nullptr;}}
@@ -31,7 +33,7 @@ class InputModeItem final:public ITfLangBarItemButton,public ITfSource {
  }
 public:
  InputModeItem(){InterlockedIncrement(&objects);}
- ~InputModeItem(){if(notifications)DestroyWindow(notifications);SafeRelease(sink);InterlockedDecrement(&objects);}
+ ~InputModeItem(){if(notifications)DestroyWindow(notifications);std::wstring name=std::wstring(L"HanBonGo.IconNotifications.")+kSourceVersion;UnregisterClassW(name.c_str(),module);SafeRelease(sink);InterlockedDecrement(&objects);}
  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void** p) override{
   if(!p)return E_POINTER;*p=nullptr;
   if(id==IID_IUnknown||id==IID_ITfLangBarItem||id==IID_ITfLangBarItemButton)*p=static_cast<ITfLangBarItemButton*>(this);
@@ -88,38 +90,95 @@ class Service final:public ITfTextInputProcessorEx,public ITfKeyEventSink,public
  DWORD focusCookie=TF_INVALID_COOKIE,profileCookie=TF_INVALID_COOKIE;
  DWORD languageCookie=TF_INVALID_COOKIE;
  ITfLangBarItemMgr* langBar=nullptr;InputModeItem* inputMode=nullptr;
+ enum class CandidateMode {Hidden,Preview,Converted};
  std::wstring keys; std::vector<std::wstring> candidates;size_t selected=0;
- hj::Engine engine; HWND popup=nullptr; RECT anchor{};
+ CandidateMode candidateMode=CandidateMode::Hidden;bool dictionaryReady=false;
+ hj::Engine engine;hj::LiveCandidates live;HWND popup=nullptr,resultWindow=nullptr;RECT anchor{};
+ HANDLE embeddedFont=nullptr;HFONT bodyFont=nullptr,headingFont=nullptr;UINT fontDpi=0;
  bool focused=true;bool keyForeground=false;
+ static int Scale(int value,UINT dpi){return MulDiv(value,static_cast<int>(dpi),96);}
+ UINT PopupDpi() const {
+  using GetDpiForWindowFn=UINT(WINAPI*)(HWND);
+  static auto getDpi=reinterpret_cast<GetDpiForWindowFn>(GetProcAddress(GetModuleHandleW(L"user32.dll"),"GetDpiForWindow"));
+  return popup&&getDpi?getDpi(popup):96;
+ }
+ void Fonts(UINT dpi){
+  if(bodyFont&&headingFont&&fontDpi==dpi)return;
+  if(bodyFont)DeleteObject(bodyFont);if(headingFont)DeleteObject(headingFont);
+  bodyFont=CreateFontW(-Scale(20,dpi),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Pretendard JP");
+  headingFont=CreateFontW(-Scale(14,dpi),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Pretendard JP");fontDpi=dpi;
+ }
+ void LoadFont(){
+  if(embeddedFont)return;
+  HRSRC resource=FindResourceW(module,MAKEINTRESOURCEW(102),RT_RCDATA);
+  if(!resource)return;HGLOBAL loaded=LoadResource(module,resource);DWORD count=0;
+  if(loaded)embeddedFont=AddFontMemResourceEx(LockResource(loaded),SizeofResource(module,resource),nullptr,&count);
+ }
+ static LRESULT CALLBACK ResultProc(HWND h,UINT m,WPARAM w,LPARAM l){
+  auto self=reinterpret_cast<Service*>(GetWindowLongPtrW(h,GWLP_USERDATA));
+  if(m==WM_NCCREATE){self=static_cast<Service*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));}
+  if(m==WM_APP+2&&self){
+   self->AddRef();bool active=IsHanBonGoActive();
+   // COM profile queries can reenter TSF and deactivate this service. Retain
+   // the object and recheck all UI state after that query before showing results.
+   if(active&&self->candidateMode==CandidateMode::Preview&&self->focused&&self->keyForeground&&self->composition&&self->compositionContext){
+    std::vector<std::wstring> results;if(self->live.Take(results)&&!results.empty()){self->candidates=std::move(results);self->selected=0;self->dictionaryReady=true;self->Show();}
+   }self->Release();return 0;
+  }
+  return DefWindowProcW(h,m,w,l);
+ }
+ void SchedulePreview(){
+  if(candidateMode!=CandidateMode::Preview||keys.empty())return;
+  if(!resultWindow){std::wstring name=std::wstring(L"HanBonGo.CandidateResults.")+kSourceVersion;WNDCLASSW wc{};wc.hInstance=module;wc.lpfnWndProc=ResultProc;wc.lpszClassName=name.c_str();RegisterClassW(&wc);
+   resultWindow=CreateWindowExW(0,name.c_str(),L"",0,0,0,0,0,HWND_MESSAGE,nullptr,module,this);}
+  if(resultWindow&&live.Start(module,&objects,resultWindow,WM_APP+2))live.Submit(hj::Reading(hj::Compose(keys)));
+ }
+ void Preview(){
+  std::wstring reading=hj::Reading(hj::Compose(keys));candidates={reading};
+  std::wstring katakana=hj::Katakana(reading);if(katakana!=reading)candidates.push_back(std::move(katakana));
+  selected=0;candidateMode=CandidateMode::Preview;dictionaryReady=false;live.Cancel();
+ }
  static LRESULT CALLBACK WindowProc(HWND h,UINT m,WPARAM w,LPARAM l){
   auto self=reinterpret_cast<Service*>(GetWindowLongPtrW(h,GWLP_USERDATA));
   if(m==WM_NCCREATE){self=static_cast<Service*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));}
   if(m==WM_MOUSEACTIVATE)return MA_NOACTIVATE;
-  if(m==WM_PAINT&&self){PAINTSTRUCT ps;HDC dc=BeginPaint(h,&ps);RECT r;GetClientRect(h,&r);FillRect(dc,&r,reinterpret_cast<HBRUSH>(COLOR_WINDOW+1));
-   HFONT font=CreateFontW(-18,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Yu Gothic UI");
-   auto old=SelectObject(dc,font);SetBkMode(dc,TRANSPARENT);
+  if(m==WM_DPICHANGED&&self){self->fontDpi=0;self->Show();return 0;}
+  if(m==WM_PAINT&&self){PAINTSTRUCT ps;HDC dc=BeginPaint(h,&ps);RECT r;GetClientRect(h,&r);FillRect(dc,&r,static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+   UINT dpi=self->PopupDpi();self->Fonts(dpi);auto old=SelectObject(dc,self->headingFont);SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(117,133,154));
    std::wstring heading=hj::Compose(self->keys)+L" → "+hj::Reading(hj::Compose(self->keys));
-   TextOutW(dc,10,8,heading.c_str(),static_cast<int>(heading.size()));
+   RECT headingRect{Scale(14,dpi),Scale(8,dpi),r.right-Scale(14,dpi),Scale(35,dpi)};DrawTextW(dc,heading.c_str(),static_cast<int>(heading.size()),&headingRect,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
+   SelectObject(dc,self->bodyFont);
    size_t start=(self->selected/9)*9;
-   for(size_t i=start;i<std::min(start+9,self->candidates.size());++i){RECT row{4,36+static_cast<LONG>((i-start)*28),r.right-4,64+static_cast<LONG>((i-start)*28)};
-    if(i==self->selected){FillRect(dc,&row,reinterpret_cast<HBRUSH>(COLOR_HIGHLIGHT+1));SetTextColor(dc,GetSysColor(COLOR_HIGHLIGHTTEXT));}else SetTextColor(dc,GetSysColor(COLOR_WINDOWTEXT));
-    std::wstring s=std::to_wstring(i-start+1)+L"  "+self->candidates[i];TextOutW(dc,10,row.top+3,s.c_str(),static_cast<int>(s.size()));}
-   SelectObject(dc,old);DeleteObject(font);EndPaint(h,&ps);return 0;
+   for(size_t i=start;i<std::min(start+9,self->candidates.size());++i){RECT row{Scale(4,dpi),Scale(38+static_cast<int>((i-start)*34),dpi),r.right-Scale(4,dpi),Scale(72+static_cast<int>((i-start)*34),dpi)};
+    bool selected=i==self->selected;
+    if(selected){HBRUSH blue=CreateSolidBrush(RGB(0,120,212));FillRect(dc,&row,blue);DeleteObject(blue);}
+    SetTextColor(dc,selected?RGB(255,255,255):RGB(142,151,164));
+    RECT numberRect{Scale(15,dpi),row.top,Scale(45,dpi),row.bottom};std::wstring number=std::to_wstring(i-start+1);DrawTextW(dc,number.c_str(),static_cast<int>(number.size()),&numberRect,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
+    SetTextColor(dc,selected?RGB(255,255,255):RGB(28,34,43));RECT textRect{Scale(51,dpi),row.top,r.right-Scale(15,dpi),row.bottom};
+    DrawTextW(dc,self->candidates[i].c_str(),static_cast<int>(self->candidates[i].size()),&textRect,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);}
+   SelectObject(dc,old);EndPaint(h,&ps);return 0;
   }
   return DefWindowProcW(h,m,w,l);
  }
  void Hide(){if(popup)ShowWindow(popup,SW_HIDE);}
  void Show(){
-  if(candidates.empty()||!focused){Hide();return;}
+  if(candidateMode==CandidateMode::Hidden||candidates.empty()||!focused){Hide();return;}
   if(!popup){std::wstring popupClass=std::wstring(L"HangulJpIME.Candidates.")+kSourceVersion;WNDCLASSW wc{};wc.hInstance=module;wc.lpfnWndProc=WindowProc;wc.lpszClassName=popupClass.c_str();wc.hCursor=LoadCursor(nullptr,IDC_ARROW);RegisterClassW(&wc);
    popup=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TOPMOST,wc.lpszClassName,kName,WS_POPUP|WS_BORDER,0,0,420,100,nullptr,nullptr,module,this);}
   RECT work{};MONITORINFO info{sizeof(info)};GetMonitorInfoW(MonitorFromRect(&anchor,MONITOR_DEFAULTTONEAREST),&info);work=info.rcWork;
-  int width=420,height=42+static_cast<int>(std::min<size_t>(9,candidates.size()-(selected/9)*9))*28;
+  UINT dpi=PopupDpi();Fonts(dpi);
+  HDC measure=GetDC(popup);auto old=SelectObject(measure,bodyFont);int contentWidth=0;
+  for(const auto& candidate:candidates){SIZE size{};GetTextExtentPoint32W(measure,candidate.c_str(),static_cast<int>(candidate.size()),&size);contentWidth=std::max(contentWidth,static_cast<int>(size.cx));}
+  SelectObject(measure,headingFont);std::wstring heading=hj::Compose(keys)+L" → "+hj::Reading(hj::Compose(keys));SIZE headingSize{};GetTextExtentPoint32W(measure,heading.c_str(),static_cast<int>(heading.size()),&headingSize);
+  SelectObject(measure,old);ReleaseDC(popup,measure);
+  int width=std::max(Scale(360,dpi),std::max(contentWidth+Scale(76,dpi),static_cast<int>(headingSize.cx)+Scale(30,dpi)));
+  width=std::min(width,std::min(Scale(760,dpi),static_cast<int>(work.right-work.left)));
+  int height=Scale(44+static_cast<int>(std::min<size_t>(9,candidates.size()-(selected/9)*9))*34,dpi);
   int x=std::clamp<LONG>(anchor.left,work.left,std::max(work.left,work.right-width));int y=anchor.bottom;
   if(y+height>work.bottom)y=std::max<LONG>(work.top,anchor.top-height);
   SetWindowPos(popup,HWND_TOPMOST,x,y,width,height,SWP_NOACTIVATE|SWP_SHOWWINDOW);InvalidateRect(popup,nullptr,TRUE);
  }
- void Reset(){keys.clear();candidates.clear();selected=0;Hide();}
+ void Reset(){live.Cancel();keys.clear();candidates.clear();selected=0;candidateMode=CandidateMode::Hidden;dictionaryReady=false;Hide();}
  bool Wants(UINT k){
   if(GetKeyState(VK_CONTROL)&0x8000||GetKeyState(VK_MENU)&0x8000||GetKeyState(VK_LWIN)&0x8000||GetKeyState(VK_RWIN)&0x8000)return false;
   if(k>='A'&&k<='Z')return true;
@@ -138,13 +197,13 @@ class Service final:public ITfTextInputProcessorEx,public ITfKeyEventSink,public
  }
  HRESULT Finish(ITfContext* c,bool cancel=false){
   if(keys.empty()&&!composition)return S_OK;
-  std::wstring s=cancel?L"":candidates.empty()?hj::Reading(hj::Compose(keys)):candidates[selected];
+  std::wstring s=cancel?L"":candidateMode==CandidateMode::Converted&&!candidates.empty()?candidates[selected]:hj::Reading(hj::Compose(keys));
   HRESULT hr=Request(c,s,true);if(SUCCEEDED(hr))Reset();return hr;
  }
- void FinishFocus(){if(compositionContext)Finish(compositionContext);else Reset();Hide();}
+ void FinishFocus(){live.Cancel();if(compositionContext)Finish(compositionContext);else Reset();Hide();}
 public:
- Service(){InterlockedIncrement(&objects);}
- ~Service(){Deactivate();if(popup)DestroyWindow(popup);InterlockedDecrement(&objects);}
+ Service(){InterlockedIncrement(&objects);LoadFont();}
+ ~Service(){Deactivate();if(popup)DestroyWindow(popup);std::wstring name=std::wstring(L"HangulJpIME.Candidates.")+kSourceVersion;UnregisterClassW(name.c_str(),module);if(bodyFont)DeleteObject(bodyFont);if(headingFont)DeleteObject(headingFont);if(embeddedFont)RemoveFontMemResourceEx(embeddedFont);InterlockedDecrement(&objects);}
  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id,void** p) override{
   if(!p)return E_POINTER;*p=nullptr;
   if(id==IID_IUnknown||id==IID_ITfTextInputProcessor||id==IID_ITfTextInputProcessorEx)*p=static_cast<ITfTextInputProcessorEx*>(this);
@@ -177,6 +236,8 @@ public:
   if(FAILED(hr)){Deactivate();return hr;}inputMode->Refresh();return S_OK;
  }
  HRESULT STDMETHODCALLTYPE Deactivate() override{
+  live.Stop();if(resultWindow){DestroyWindow(resultWindow);resultWindow=nullptr;}
+  std::wstring resultClass=std::wstring(L"HanBonGo.CandidateResults.")+kSourceVersion;UnregisterClassW(resultClass.c_str(),module);
   if(langBar&&inputMode)langBar->RemoveItem(inputMode);
   SafeRelease(inputMode);SafeRelease(langBar);
   if(manager){FinishFocus();ITfKeystrokeMgr* km=nullptr;if(keyAdvised&&SUCCEEDED(manager->QueryInterface(IID_ITfKeystrokeMgr,reinterpret_cast<void**>(&km)))){km->UnadviseKeyEventSink(client);km->Release();}
@@ -231,25 +292,38 @@ public:
   UINT k=static_cast<UINT>(key);*eaten=FALSE;
   if(!keyForeground||!IsHanBonGoActive())return S_OK;
   if(!Wants(k)){if(!keys.empty())Finish(c);return S_OK;}
-  auto oldKeys=keys;auto oldCandidates=candidates;auto oldSelected=selected;HRESULT hr=S_OK;
+  auto oldKeys=keys;auto oldCandidates=candidates;auto oldSelected=selected;auto oldMode=candidateMode;bool oldReady=dictionaryReady;HRESULT hr=S_OK;bool schedule=false;
   if(k==VK_RETURN)hr=Finish(c);
-  else if(k==VK_ESCAPE){if(!candidates.empty()){candidates.clear();hr=Request(c,hj::Reading(hj::Compose(keys)),false);}else hr=Finish(c,true);}
-  else if(k==VK_BACK){candidates.clear();keys.pop_back();hr=Request(c,hj::Reading(hj::Compose(keys)),keys.empty());}
-  else if(k==VK_SPACE){if(candidates.empty()){candidates=engine.Convert(hj::Reading(hj::Compose(keys)));selected=0;}else selected=(selected+1)%candidates.size();hr=Request(c,candidates[selected],false);}
-  else if(k==VK_OEM_MINUS){
-   if(!candidates.empty()){hr=Finish(c);if(FAILED(hr))return S_OK;}
-   if(keys.size()>=256){*eaten=TRUE;return S_OK;}keys+=L'-';hr=Request(c,hj::Reading(hj::Compose(keys)),false);
+  else if(k==VK_ESCAPE){
+   live.Cancel();if(candidateMode!=CandidateMode::Hidden){candidates.clear();selected=0;candidateMode=CandidateMode::Hidden;dictionaryReady=false;hr=Request(c,hj::Reading(hj::Compose(keys)),false);}else hr=Finish(c,true);
   }
-  else if(!candidates.empty()&&(k>='1'&&k<='9')){size_t index=(selected/9)*9+k-'1';if(index<candidates.size()){selected=index;hr=Finish(c);}}
+  else if(k==VK_BACK){
+   live.Cancel();keys.pop_back();if(keys.empty()){candidates.clear();candidateMode=CandidateMode::Hidden;hr=Request(c,L"",true);if(SUCCEEDED(hr))Reset();}
+   else {Preview();hr=Request(c,hj::Reading(hj::Compose(keys)),false);schedule=true;}
+  }
+  else if(k==VK_SPACE){
+   live.Cancel();if(candidateMode!=CandidateMode::Converted){
+    // Conversion is explicit. A preview never silently changes document text.
+    if(!dictionaryReady)candidates=engine.Convert(hj::Reading(hj::Compose(keys)));
+    selected=0;candidateMode=CandidateMode::Converted;dictionaryReady=true;
+   }else selected=(selected+1)%candidates.size();hr=Request(c,candidates[selected],false);
+  }
+  else if(k==VK_OEM_MINUS){
+   if(candidateMode==CandidateMode::Converted){hr=Finish(c);if(FAILED(hr))return S_OK;}
+   if(keys.size()>=256){*eaten=TRUE;return S_OK;}keys+=L'-';Preview();hr=Request(c,hj::Reading(hj::Compose(keys)),false);schedule=true;
+  }
+  else if(!candidates.empty()&&(k>='1'&&k<='9')){size_t index=(selected/9)*9+k-'1';if(index<candidates.size()){live.Cancel();candidateMode=CandidateMode::Converted;selected=index;hr=Finish(c);}}
   else if(!candidates.empty()&&(k==VK_UP||k==VK_LEFT||k==VK_DOWN||k==VK_RIGHT||k==VK_PRIOR||k==VK_NEXT)){
+   live.Cancel();candidateMode=CandidateMode::Converted;
    int step=(k==VK_PRIOR||k==VK_NEXT)?9:1;int dir=(k==VK_UP||k==VK_LEFT||k==VK_PRIOR)?-1:1;
    selected=static_cast<size_t>((static_cast<int>(selected)+dir*step+static_cast<int>(candidates.size())*9)%static_cast<int>(candidates.size()));hr=Request(c,candidates[selected],false);
-  }else if(k==VK_F6||k==VK_F7){candidates={k==VK_F7?hj::Katakana(hj::Reading(hj::Compose(keys))):hj::Reading(hj::Compose(keys))};selected=0;hr=Request(c,candidates[0],false);}
+  }else if(k==VK_F6||k==VK_F7){live.Cancel();candidateMode=CandidateMode::Converted;dictionaryReady=true;candidates={k==VK_F7?hj::Katakana(hj::Reading(hj::Compose(keys))):hj::Reading(hj::Compose(keys))};selected=0;hr=Request(c,candidates[0],false);}
   else if(auto j=hj::KeyJamo(k,(GetKeyState(VK_SHIFT)&0x8000)!=0)){
-   if(!candidates.empty()){hr=Finish(c);if(FAILED(hr))return S_OK;}
-   if(keys.size()>=256){*eaten=TRUE;return S_OK;}keys+=j;hr=Request(c,hj::Reading(hj::Compose(keys)),false);
+   if(candidateMode==CandidateMode::Converted){hr=Finish(c);if(FAILED(hr))return S_OK;}
+   if(keys.size()>=256){*eaten=TRUE;return S_OK;}keys+=j;Preview();hr=Request(c,hj::Reading(hj::Compose(keys)),false);schedule=true;
   }
-  if(SUCCEEDED(hr))*eaten=TRUE;else {keys=std::move(oldKeys);candidates=std::move(oldCandidates);selected=oldSelected;Show();}return S_OK;
+  if(SUCCEEDED(hr)){*eaten=TRUE;if(schedule)SchedulePreview();}
+  else {keys=std::move(oldKeys);candidates=std::move(oldCandidates);selected=oldSelected;candidateMode=oldMode;dictionaryReady=oldReady;Show();if(candidateMode==CandidateMode::Preview)SchedulePreview();}return S_OK;
  }
  HRESULT STDMETHODCALLTYPE OnCompositionTerminated(TfEditCookie,ITfComposition* comp) override{if(comp==composition){SafeRelease(composition);SafeRelease(compositionContext);Reset();}return S_OK;}
  HRESULT STDMETHODCALLTYPE OnInitDocumentMgr(ITfDocumentMgr*) override{return S_OK;}
