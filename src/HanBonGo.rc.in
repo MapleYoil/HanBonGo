@@ -3,8 +3,8 @@
 101 ICON "@CMAKE_CURRENT_SOURCE_DIR@/src/resources/HanBonGo.ico"
 102 RCDATA "@CMAKE_CURRENT_SOURCE_DIR@/src/resources/fonts/PretendardJP-Regular.ttf"
 1 VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION @resource_version@
+PRODUCTVERSION @resource_version@
 FILETYPE VFT_DLL
 BEGIN
  BLOCK "StringFileInfo"
@@ -13,8 +13,8 @@ BEGIN
   BEGIN
    VALUE "FileDescription", "한본어 입력기"
    VALUE "ProductName", "HanBonGo"
-   VALUE "FileVersion", "0.1.0"
-   VALUE "ProductVersion", "0.1.0"
+   VALUE "FileVersion", "@product_version@"
+   VALUE "ProductVersion", "@product_version@"
    VALUE "CompanyName", "MapleYoil"
   END
  END

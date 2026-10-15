@@ -71,6 +71,25 @@ std::wstring Reading(const std::wstring& text) {
  return out;
 }
 std::wstring Katakana(std::wstring t) {for(auto& c:t)if(c>=0x3041&&c<=0x3096)c+=0x60;return t;}
+std::vector<std::wstring> KanaCandidates(const std::wstring& reading){
+ // The same sound can be written as お or を. Offer spelling choices without
+ // changing the reading, inferring particles, or rewriting dictionary words.
+ // Keep at most eight hiragana spellings: the original, six single-position
+ // choices from the right, and the spelling with every お replaced by を.
+ std::vector<std::wstring> hiragana{reading};
+ auto addUnique=[](std::vector<std::wstring>& values,const std::wstring& value){
+  if(std::find(values.begin(),values.end(),value)==values.end())values.push_back(value);
+ };
+ for(size_t i=reading.size();i>0&&hiragana.size()<7;--i){
+  if(reading[i-1]!=L'お')continue;
+  auto alternate=reading;alternate[i-1]=L'を';addUnique(hiragana,alternate);
+ }
+ auto alternate=reading;
+ std::replace(alternate.begin(),alternate.end(),L'お',L'を');addUnique(hiragana,alternate);
+ std::vector<std::wstring> results=hiragana;
+ for(const auto& value:hiragana)addUnique(results,Katakana(value));
+ return results;
+}
 Engine::~Engine(){if(language_){language_->Close();language_->Release();}}
 HRESULT Engine::Open(){
  if(language_)return S_OK;
@@ -82,16 +101,19 @@ HRESULT Engine::Open(){
  return status_;
 }
 std::vector<std::wstring> Engine::Convert(const std::wstring& reading){
- std::vector<std::wstring> results;
+ std::vector<std::wstring> results;const auto kana=KanaCandidates(reading);
+ const bool optionalSpelling=reading.find(L'お')!=std::wstring::npos;
  if(SUCCEEDED(Open())&&!reading.empty()&&reading.size()<=256){
   for(int i=0;i<32;++i){MORRSLT* r=nullptr;
    status_=language_->GetJMorphResult(FELANG_REQ_CONV,FELANG_CMODE_PLAURALCLAUSE|FELANG_CMODE_MERGECAND,
      static_cast<int>(reading.size()),i?nullptr:reading.c_str(),nullptr,&r);
-   if(r){if(r->pwchOutput&&r->cchOutput){std::wstring s(r->pwchOutput,r->cchOutput);if(std::find(results.begin(),results.end(),s)==results.end())results.push_back(s);}CoTaskMemFree(r);}
+   if(r){if(r->pwchOutput&&r->cchOutput){std::wstring s(r->pwchOutput,r->cchOutput);if((!optionalSpelling||std::find(kana.begin(),kana.end(),s)==kana.end())&&std::find(results.begin(),results.end(),s)==results.end())results.push_back(s);}CoTaskMemFree(r);}
    if(status_!=S_OK)break;
   }
  }
- for(auto s:{reading,Katakana(reading)})if(std::find(results.begin(),results.end(),s)==results.end())results.push_back(s);
+ // Group optional spellings in a stable order only when お is ambiguous.
+ // Otherwise preserve the dictionary's original order, including katakana.
+ for(const auto& value:kana)if(std::find(results.begin(),results.end(),value)==results.end())results.push_back(value);
  return results;
 }
 }

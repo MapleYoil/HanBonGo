@@ -19,12 +19,16 @@ $newVersion = (Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json).vers
 $newTool = Join-Path $newVersion 'x64\ime-tool.exe'
 $identity = @(& $newTool --version)
 if ($LASTEXITCODE -ne 0 -or $identity.Count -lt 1) { throw 'Cannot read the installed keyboard identity.' }
-$inputTip = '0411:' + $identity[0] + '{E97A77BE-9C2D-4E9D-81AD-6A2F76D9AB25}'
+$tipOutput = @(& $newTool --input-tip)
+if ($LASTEXITCODE -ne 0 -or $tipOutput.Count -ne 1 -or $tipOutput[0] -notmatch '^0411:\{[A-Fa-f0-9-]{36}\}\{[A-Fa-f0-9-]{36}\}$') { throw 'Cannot read the installed language profile identity.' }
+$inputTip = [string]$tipOutput[0]
 Update-HanBonGoKeyboardList $languages $inputTip
 try {
-    Set-WinUserLanguageList -LanguageList $languages -Force
     & $newTool --user-install
     if ($LASTEXITCODE -ne 0) { throw 'User keyboard installation failed (InstallLayoutOrTip).' }
+    # InstallLayoutOrTip can append an already listed profile. Restore the
+    # captured positions after native registration has completed.
+    Set-WinUserLanguageList -LanguageList $languages -Force
 } finally {
     Restore-HanBonGoInputPreference $previousDefaultTip $inputTip
 }
@@ -33,6 +37,8 @@ if ($LASTEXITCODE -ne 0) { throw 'User keyboard installation verification failed
 & $newTool --refresh-list
 if ($LASTEXITCODE -ne 0) { throw 'Keyboard list refresh failed.' }
 foreach ($architecture in @('x64', 'Win32')) {
+    & (Join-Path $newVersion "$architecture\ime-tool.exe") --registration
+    if ($LASTEXITCODE -ne 0) { throw "Keyboard registration verification failed: $architecture" }
     & (Join-Path $newVersion "$architecture\ime-tool.exe") --branding (Join-Path $newVersion "$architecture\HangulJpIME.dll")
     if ($LASTEXITCODE -ne 0) { throw "Keyboard taskbar icon verification failed: $architecture" }
 }

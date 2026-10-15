@@ -1,7 +1,7 @@
 #pragma once
 #include <windows.h>
-// Different COM identity per source release prevents cached old class factories
-// in running applications from handling the new keyboard profile.
+// Both identities change per source release. TSF also caches language profiles
+// in long-running applications independently of their COM class identity.
 inline const CLSID kService={0x7b3b1841,0xa842,0x4bc5,{@identity_bytes@}};
-inline const GUID kProfile={0xe97a77be,0x9c2d,0x4e9d,{0x81,0xad,0x6a,0x2f,0x76,0xd9,0xab,0x25}};
+inline const GUID kProfile={0xe97a77be,0x9c2d,0x4e9d,{@profile_bytes@}};
 inline const wchar_t* kSourceVersion=L"@source_hash@";

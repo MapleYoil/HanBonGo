@@ -86,7 +86,7 @@ void LiveCandidates::Run(const std::shared_ptr<State>& state){
    {CriticalLock guard(state->lock);stop=state->stop;pending=state->pending;
     generation=state->generation;reading=state->reading;state->pending=false;}
    if(stop)break;if(!pending)continue;
-   auto results=SUCCEEDED(apartment.status)?engine.Convert(reading):std::vector<std::wstring>{reading,Katakana(reading)};
+   auto results=SUCCEEDED(apartment.status)?engine.Convert(reading):KanaCandidates(reading);
    CriticalLock guard(state->lock);
    if(!state->stop&&state->generation==generation){
     state->results=std::move(results);state->ready=true;

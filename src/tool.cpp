@@ -1,4 +1,5 @@
 #include "core.h"
+#include <algorithm>
 #include <iostream>
 #include <io.h>
 #include <fcntl.h>
@@ -7,7 +8,7 @@
 #include <ctfutb.h>
 #include <ctffunc.h>
 #include "identity.h"
-int Integration(const wchar_t* path);
+int Integration(const wchar_t* path,bool externalSwitch=false);
 struct LayoutOrTipProfile {
  DWORD type;LANGID language;CLSID service;GUID profile;GUID category;
  DWORD substituteLayout;DWORD flags;WCHAR id[MAX_PATH];
@@ -20,6 +21,15 @@ static int UserInstall(bool install,bool verifyOnly=false){
  int result=1;wchar_t cls[40],profile[40];StringFromGUID2(kService,cls,40);StringFromGUID2(kProfile,profile,40);
  std::wstring tip=std::wstring(L"0x0411:")+cls+profile;
  if(installTip&&enumerate&&(verifyOnly||installTip(tip.c_str(),install?0:0x00000001))){
+  if(install&&!verifyOnly){
+   // Machine-wide enabled-by-default metadata is not a user enablement.
+   // Explicitly enable this profile for the signing-in user without activating
+   // it or changing their default keyboard.
+   ITfInputProcessorProfiles* profiles=nullptr;
+   HRESULT hr=CoCreateInstance(CLSID_TF_InputProcessorProfiles,nullptr,CLSCTX_INPROC_SERVER,IID_ITfInputProcessorProfiles,reinterpret_cast<void**>(&profiles));
+   if(SUCCEEDED(hr)){hr=profiles->EnableLanguageProfile(kService,0x0411,kProfile,TRUE);profiles->Release();}
+   if(hr!=S_OK){std::wcerr<<L"Enable user keyboard profile failed: 0x"<<std::hex<<hr<<L"\n";FreeLibrary(input);return 1;}
+  }
   if(!install){result=0;std::wcout<<L"User keyboard uninstalled\n";}
   else {
    UINT count=enumerate(nullptr,nullptr,nullptr,nullptr,0);
@@ -40,8 +50,9 @@ int wmain(int argc,wchar_t** argv){
  if(argc<2){std::wcerr<<L"--test | --probe | --convert <hangul> | --register <dll> | --unregister <dll>\n";return 2;}
  std::wstring command=argv[1];
  if(command==L"--version"){wchar_t id[40];StringFromGUID2(kService,id,40);std::wcout<<id<<L"\n"<<kSourceVersion<<L"\n";return 0;}
+ if(command==L"--input-tip"){wchar_t service[40],profile[40];StringFromGUID2(kService,service,40);StringFromGUID2(kProfile,profile,40);std::wcout<<L"0411:"<<service<<profile<<L"\n";return 0;}
  if(command==L"--test"){
-  int failures=0;auto check=[&](const std::wstring& actual,const std::wstring& expected){if(actual!=expected){++failures;std::wcerr<<L"FAIL: "<<actual<<L" != "<<expected<<L"\n";}};
+  int failures=0,checks=0;auto check=[&](const std::wstring& actual,const std::wstring& expected){++checks;if(actual!=expected){++failures;std::wcerr<<L"FAIL: "<<actual<<L" != "<<expected<<L"\n";}};
   check(hj::Compose(L"ㄱㅗㄴㄴㅣㅊㅣㅇㅘ"),L"곤니치와");
   check(hj::Compose(L"ㄱㅏㄴㅏ"),L"가나");check(hj::Compose(L"ㄷㅏㄹㄱㅏ"),L"달가");
   check(hj::Compose(L"ㄷㅏㄹㄱ"),L"닭");check(hj::Compose(L"ㅂㅜㅅㅣ"),L"부시");
@@ -52,11 +63,41 @@ int wmain(int argc,wchar_t** argv){
   check(std::wstring(1,hj::KeyJamo('R',false)),L"ㄱ");check(std::wstring(1,hj::KeyJamo('R',true)),L"ㄲ");
   check(hj::Reading(hj::Compose(L"ㅋㅗ-ㅎㅣ-")),L"こーひー");
   check(hj::Reading(hj::Compose(L"ㅋㅗ-ㅎㅣ")),L"こーひ");
-  std::wcout<<(failures?L"FAILED":L"PASS")<<L" (16 checks)\n";return failures?1:0;
+  auto checkCandidates=[&](const std::wstring& reading,const std::vector<std::wstring>& expected){
+   ++checks;auto actual=hj::KanaCandidates(reading);if(actual!=expected){++failures;std::wcerr<<L"FAIL candidate order: "<<reading<<L"\n";
+    for(const auto& value:actual)std::wcerr<<L" ["<<value<<L"]";std::wcerr<<L"\n";}
+  };
+  check(hj::Reading(L"소노스베테오"),L"そのすべてお");
+  checkCandidates(L"そのすべてお",{L"そのすべてお",L"そのすべてを",L"ソノスベテオ",L"ソノスベテヲ"});
+  checkCandidates(L"あお",{L"あお",L"あを",L"アオ",L"アヲ"});
+  checkCandidates(L"おお",{L"おお",L"おを",L"をお",L"をを",L"オオ",L"オヲ",L"ヲオ",L"ヲヲ"});
+  checkCandidates(L"おーお",{L"おーお",L"おーを",L"をーお",L"をーを",L"オーオ",L"オーヲ",L"ヲーオ",L"ヲーヲ"});
+  checkCandidates(L"そのすべてを",{L"そのすべてを",L"ソノスベテヲ"});
+  checkCandidates(L"にほんご",{L"にほんご",L"ニホンゴ"});
+  checkCandidates(L"ソノスベテオ",{L"ソノスベテオ"});
+  checkCandidates(L"abc",{L"abc"});
+  checkCandidates(L"",{L""});
+  const std::wstring repeatedO(40,L'お');const auto bounded=hj::KanaCandidates(repeatedO);
+  auto verify=[&](bool passed,const wchar_t* description){++checks;if(!passed){++failures;std::wcerr<<L"FAIL: "<<description<<L"\n";}};
+  verify(!bounded.empty()&&bounded.front()==repeatedO,L"optional o/wo candidates preserve original reading first");
+  verify(bounded.size()<=16,L"optional o/wo candidates stay bounded with many ambiguous characters");
+  verify(std::count(bounded.begin(),bounded.end(),std::wstring(40,L'を'))==1,L"bounded candidates retain all-wo option exactly once");
+  for(size_t i=0;i<bounded.size();++i)verify(std::find(bounded.begin(),bounded.begin()+i,bounded[i])==bounded.begin()+i,L"optional o/wo candidates contain no duplicates");
+  std::wcout<<(failures?L"FAILED":L"PASS")<<L" ("<<checks<<L" checks)\n";return failures?1:0;
  }
  HRESULT init=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);if(FAILED(init)){std::wcerr<<L"COM: "<<std::hex<<init<<L"\n";return 1;}
  int exitCode=0;
- if(command==L"--branding"){
+ if(command==L"--registration"){
+  ITfInputProcessorProfiles* profiles=nullptr;BSTR description=nullptr;
+  HRESULT hr=CoCreateInstance(CLSID_TF_InputProcessorProfiles,nullptr,CLSCTX_INPROC_SERVER,IID_ITfInputProcessorProfiles,reinterpret_cast<void**>(&profiles));
+  if(SUCCEEDED(hr))hr=profiles->GetLanguageProfileDescription(kService,0x0411,kProfile,&description);
+  bool named=hr==S_OK&&description&&std::wstring(description)==L"한본어 입력기";
+  std::wcout<<L"Windows profile name: "<<(named?description:L"unavailable")<<L"\n";
+  if(description)SysFreeString(description);if(profiles)profiles->Release();
+  ITfTextInputProcessorEx* service=nullptr;hr=CoCreateInstance(kService,nullptr,CLSCTX_INPROC_SERVER,IID_ITfTextInputProcessorEx,reinterpret_cast<void**>(&service));
+  bool loadable=hr==S_OK&&service;std::wcout<<L"Registered input processor loads: "<<(loadable?L"yes":L"no")<<L" (0x"<<std::hex<<hr<<L")\n";
+  if(service)service->Release();exitCode=named&&loadable?0:1;
+ }else if(command==L"--branding"){
   if(argc<3)exitCode=2;else {
    HICON largeIcon=nullptr,smallIcon=nullptr;UINT extracted=ExtractIconExW(argv[2],-101,&largeIcon,&smallIcon,1);
    bool icons=extracted>0&&extracted!=UINT_MAX&&largeIcon&&smallIcon;std::wcout<<L"Embedded HB branding icons: "<<(icons?L"yes":L"no")<<L"\n";
@@ -134,22 +175,22 @@ int wmain(int argc,wchar_t** argv){
      if(SUCCEEDED(hr))hr=languages->ChangeCurrentLanguage(0x0411);
      languages->Release();
     }
-    if(SUCCEEDED(hr))hr=profiles->ActivateProfile(TF_PROFILETYPE_INPUTPROCESSOR,0x0411,kService,kProfile,nullptr,TF_IPPMF_FORSESSION|TF_IPPMF_ENABLEPROFILE);
-    if(hr==S_OK){
-     // Switch the current editing window's input language as well. Profile
-     // activation alone does not change another thread's Korean language.
+    if(SUCCEEDED(hr)){
+     // The HKL request can select the language's default IME. Send it first;
+     // the explicit profile activation below must be the final switch.
      HWND foreground=GetForegroundWindow();HKL japanese=LoadKeyboardLayoutW(L"00000411",KLF_NOTELLSHELL);
      if(foreground&&japanese){DWORD_PTR messageResult=0;
       SendMessageTimeoutW(foreground,WM_INPUTLANGCHANGEREQUEST,0,reinterpret_cast<LPARAM>(japanese),SMTO_ABORTIFHUNG,1000,&messageResult);
      }
     }
+    if(SUCCEEDED(hr))hr=profiles->ActivateProfile(TF_PROFILETYPE_INPUTPROCESSOR,0x0411,kService,kProfile,nullptr,TF_IPPMF_FORSESSION|TF_IPPMF_ENABLEPROFILE);
    }else hr=profiles->DeactivateProfile(TF_PROFILETYPE_INPUTPROCESSOR,0x0411,kService,kProfile,nullptr,TF_IPPMF_FORSESSION);
    if(command==L"--activate"&&hr==S_OK){TF_INPUTPROCESSORPROFILE active{};hr=profiles->GetActiveProfile(GUID_TFCAT_TIP_KEYBOARD,&active);if(SUCCEEDED(hr)&&active.clsid!=kService)hr=E_FAIL;}
    profiles->Release();
   }
   std::wcout<<command<<L": 0x"<<std::hex<<hr<<L"\n";exitCode=hr==S_OK?0:1;
- }else if(command==L"--integration"){
-  exitCode=argc<3?2:Integration(argv[2]);
+ }else if(command==L"--integration"||command==L"--integration-session"){
+  exitCode=argc<3?2:Integration(argv[2],command==L"--integration-session");
  }else if(command==L"--register"||command==L"--unregister"){
   if(argc<3)exitCode=2;else {HMODULE dll=LoadLibraryW(argv[2]);if(!dll){std::wcerr<<L"LoadLibrary: "<<GetLastError()<<L"\n";exitCode=1;}else{
    auto function=reinterpret_cast<HRESULT(WINAPI*)()>(GetProcAddress(dll,command==L"--register"?"DllRegisterServer":"DllUnregisterServer"));HRESULT hr=function?function():E_NOINTERFACE;

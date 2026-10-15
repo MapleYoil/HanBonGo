@@ -4,7 +4,7 @@
     . (Join-Path $PSScriptRoot 'uninstall-common.ps1')
     $testState = [pscustomobject]@{ Checks = 0 }
     $fake = [pscustomobject]@{ Languages = $null; Tip = ''; Native = ''; NativeCalls = 0; Writes = 0; PreferenceWrites = 0; FailWrite = $false; IgnoreWrite = $false; ResetDefault = $false }
-    $han = '0411:{7B3B1841-A842-4BC5-1111-111111111111}{E97A77BE-9C2D-4E9D-81AD-6A2F76D9AB25}'
+    $han = '0411:{7B3B1841-A842-4BC5-1111-111111111111}{E97A77BE-9C2D-4E9D-1111-111111111111}'
     $oldHan = '0411:{7b3b1841-a842-4bc5-2222-222222222222}{e97a77be-9c2d-4e9d-81ad-6a2f76d9ab25}'
     $lookalike = '0411:{7B3B1841-A842-4BC5-1111-111111111111}{11111111-2222-3333-4444-555555555555}'
     $ko = '0412:{A028AE76-01B1-46C2-99C4-ACD9858AE02F}{B5FE1F02-D5F2-4445-9C03-C568F23C99A1}'

@@ -7,7 +7,9 @@ user's default input method, language order, and other keyboards. Do not select
 HanBonGo automatically during installation, updates, or Windows startup.
 Use `-SkipInstall` only for intermediate diagnostics, not final delivery.
 Do not tell the user an update is applied based only on changed registry paths.
-Keep release-specific COM identities to avoid old DLL/class-factory caches.
+Keep both COM and language-profile identities release-specific to avoid old
+DLL/class-factory and TSF language-profile caches. Read the full input tip from
+`ime-tool --input-tip`; never reconstruct it with the legacy fixed profile GUID.
 Never terminate the user's editing applications or force logout to update.
 
 Product name: 한본어 입력기 (HanBonGo). Upstream is

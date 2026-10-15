@@ -15,6 +15,16 @@ static const wchar_t* kName=L"한본어 입력기";
 // Candidate conversion keeps this registered HanBonGo profile active.
 static HINSTANCE module;
 static LONG objects=0;
+// Opt-in activation diagnostics for a dedicated test host. Ordinary editor
+// processes neither write logs nor expose their composition text.
+static void TraceActivation(const wchar_t* stage,HRESULT result){
+ wchar_t path[32768];DWORD length=GetEnvironmentVariableW(L"HANBONGO_ACTIVATION_LOG",path,32768);
+ if(!length){DWORD bytes=sizeof(path);if(RegGetValueW(HKEY_CURRENT_USER,L"Software\\HanBonGo",L"ActivationLog",RRF_RT_REG_SZ,nullptr,path,&bytes)!=ERROR_SUCCESS)return;length=static_cast<DWORD>(wcslen(path));}
+ if(!length||length>=32768)return;
+ wchar_t line[256];int count=swprintf_s(line,L"pid=%lu %s: 0x%08lX\r\n",GetCurrentProcessId(),stage,static_cast<ULONG>(result));
+ HANDLE file=CreateFileW(path,FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+ if(file!=INVALID_HANDLE_VALUE){DWORD written;WriteFile(file,line,count*sizeof(wchar_t),&written,nullptr);CloseHandle(file);}
+}
 template<class T> static void SafeRelease(T*& p){if(p){p->Release();p=nullptr;}}
 static bool IsHanBonGoActive(){
  ITfInputProcessorProfileMgr* profiles=nullptr;TF_INPUTPROCESSORPROFILE profile{};
@@ -90,8 +100,11 @@ class Service final:public ITfTextInputProcessorEx,public ITfKeyEventSink,public
  DWORD focusCookie=TF_INVALID_COOKIE,profileCookie=TF_INVALID_COOKIE;
  DWORD languageCookie=TF_INVALID_COOKIE;
  ITfLangBarItemMgr* langBar=nullptr;InputModeItem* inputMode=nullptr;
- enum class CandidateMode {Hidden,Preview,Converted};
+ enum class CandidateMode {Hidden,Preview,Browsing,Converted};
  std::wstring keys; std::vector<std::wstring> candidates;size_t selected=0;
+ // Browsing changes only the highlighted row. Keep the last explicitly
+ // applied conversion separate so focus changes cannot confirm a browsed row.
+ std::wstring appliedConversion;
  CandidateMode candidateMode=CandidateMode::Hidden;bool dictionaryReady=false;
  hj::Engine engine;hj::LiveCandidates live;HWND popup=nullptr,resultWindow=nullptr;RECT anchor{};
  HANDLE embeddedFont=nullptr;HFONT bodyFont=nullptr,headingFont=nullptr;UINT fontDpi=0;
@@ -134,29 +147,28 @@ class Service final:public ITfTextInputProcessorEx,public ITfKeyEventSink,public
   if(resultWindow&&live.Start(module,&objects,resultWindow,WM_APP+2))live.Submit(hj::Reading(hj::Compose(keys)));
  }
  void Preview(){
-  std::wstring reading=hj::Reading(hj::Compose(keys));candidates={reading};
-  std::wstring katakana=hj::Katakana(reading);if(katakana!=reading)candidates.push_back(std::move(katakana));
-  selected=0;candidateMode=CandidateMode::Preview;dictionaryReady=false;live.Cancel();
+  candidates=hj::KanaCandidates(hj::Reading(hj::Compose(keys)));
+  selected=0;candidateMode=CandidateMode::Preview;appliedConversion.clear();dictionaryReady=false;live.Cancel();
  }
  static LRESULT CALLBACK WindowProc(HWND h,UINT m,WPARAM w,LPARAM l){
   auto self=reinterpret_cast<Service*>(GetWindowLongPtrW(h,GWLP_USERDATA));
   if(m==WM_NCCREATE){self=static_cast<Service*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self));}
   if(m==WM_MOUSEACTIVATE)return MA_NOACTIVATE;
   if(m==WM_DPICHANGED&&self){self->fontDpi=0;self->Show();return 0;}
-  if(m==WM_PAINT&&self){PAINTSTRUCT ps;HDC dc=BeginPaint(h,&ps);RECT r;GetClientRect(h,&r);FillRect(dc,&r,static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+  if((m==WM_PAINT||m==WM_PRINTCLIENT)&&self){PAINTSTRUCT ps{};HDC dc=m==WM_PAINT?BeginPaint(h,&ps):reinterpret_cast<HDC>(w);if(!dc)return 0;RECT r;GetClientRect(h,&r);FillRect(dc,&r,static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
    UINT dpi=self->PopupDpi();self->Fonts(dpi);auto old=SelectObject(dc,self->headingFont);SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(117,133,154));
    std::wstring heading=hj::Compose(self->keys)+L" → "+hj::Reading(hj::Compose(self->keys));
    RECT headingRect{Scale(14,dpi),Scale(8,dpi),r.right-Scale(14,dpi),Scale(35,dpi)};DrawTextW(dc,heading.c_str(),static_cast<int>(heading.size()),&headingRect,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
    SelectObject(dc,self->bodyFont);
    size_t start=(self->selected/9)*9;
    for(size_t i=start;i<std::min(start+9,self->candidates.size());++i){RECT row{Scale(4,dpi),Scale(38+static_cast<int>((i-start)*34),dpi),r.right-Scale(4,dpi),Scale(72+static_cast<int>((i-start)*34),dpi)};
-    bool selected=i==self->selected;
+    bool selected=self->candidateMode!=CandidateMode::Preview&&i==self->selected;
     if(selected){HBRUSH blue=CreateSolidBrush(RGB(0,120,212));FillRect(dc,&row,blue);DeleteObject(blue);}
     SetTextColor(dc,selected?RGB(255,255,255):RGB(142,151,164));
     RECT numberRect{Scale(15,dpi),row.top,Scale(45,dpi),row.bottom};std::wstring number=std::to_wstring(i-start+1);DrawTextW(dc,number.c_str(),static_cast<int>(number.size()),&numberRect,DT_SINGLELINE|DT_VCENTER|DT_NOPREFIX);
     SetTextColor(dc,selected?RGB(255,255,255):RGB(28,34,43));RECT textRect{Scale(51,dpi),row.top,r.right-Scale(15,dpi),row.bottom};
     DrawTextW(dc,self->candidates[i].c_str(),static_cast<int>(self->candidates[i].size()),&textRect,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);}
-   SelectObject(dc,old);EndPaint(h,&ps);return 0;
+   SelectObject(dc,old);if(m==WM_PAINT)EndPaint(h,&ps);return 0;
   }
   return DefWindowProcW(h,m,w,l);
  }
@@ -178,7 +190,7 @@ class Service final:public ITfTextInputProcessorEx,public ITfKeyEventSink,public
   if(y+height>work.bottom)y=std::max<LONG>(work.top,anchor.top-height);
   SetWindowPos(popup,HWND_TOPMOST,x,y,width,height,SWP_NOACTIVATE|SWP_SHOWWINDOW);InvalidateRect(popup,nullptr,TRUE);
  }
- void Reset(){live.Cancel();keys.clear();candidates.clear();selected=0;candidateMode=CandidateMode::Hidden;dictionaryReady=false;Hide();}
+ void Reset(){live.Cancel();keys.clear();candidates.clear();selected=0;candidateMode=CandidateMode::Hidden;appliedConversion.clear();dictionaryReady=false;Hide();}
  bool Wants(UINT k){
   if(GetKeyState(VK_CONTROL)&0x8000||GetKeyState(VK_MENU)&0x8000||GetKeyState(VK_LWIN)&0x8000||GetKeyState(VK_RWIN)&0x8000)return false;
   if(k>='A'&&k<='Z')return true;
@@ -195,9 +207,10 @@ class Service final:public ITfTextInputProcessorEx,public ITfKeyEventSink,public
   // host cannot grant it; this avoids stale asynchronous edits in another field.
   session->Release();return FAILED(hr)?hr:result;
  }
- HRESULT Finish(ITfContext* c,bool cancel=false){
+ HRESULT Finish(ITfContext* c,bool cancel=false,bool confirmCandidate=false){
   if(keys.empty()&&!composition)return S_OK;
-  std::wstring s=cancel?L"":candidateMode==CandidateMode::Converted&&!candidates.empty()?candidates[selected]:hj::Reading(hj::Compose(keys));
+  bool chosen=confirmCandidate&&(candidateMode==CandidateMode::Browsing||candidateMode==CandidateMode::Converted)&&!candidates.empty();
+  std::wstring s=cancel?L"":chosen?candidates[selected]:!appliedConversion.empty()?appliedConversion:hj::Reading(hj::Compose(keys));
   HRESULT hr=Request(c,s,true);if(SUCCEEDED(hr))Reset();return hr;
  }
  void FinishFocus(){live.Cancel();if(compositionContext)Finish(compositionContext);else Reset();Hide();}
@@ -218,24 +231,30 @@ public:
  ULONG STDMETHODCALLTYPE AddRef() override{return InterlockedIncrement(&refs);}
  ULONG STDMETHODCALLTYPE Release() override{ULONG r=InterlockedDecrement(&refs);if(!r)delete this;return r;}
  HRESULT STDMETHODCALLTYPE Activate(ITfThreadMgr* m,TfClientId id) override{return ActivateEx(m,id,0);}
- HRESULT STDMETHODCALLTYPE ActivateEx(ITfThreadMgr* m,TfClientId id,DWORD) override{
+ HRESULT STDMETHODCALLTYPE ActivateEx(ITfThreadMgr* m,TfClientId id,DWORD flags) override{
+  TraceActivation(L"ActivateEx flags",static_cast<HRESULT>(flags));
   if(manager)return E_UNEXPECTED;manager=m;manager->AddRef();client=id;
   ITfKeystrokeMgr* km=nullptr;HRESULT hr=manager->QueryInterface(IID_ITfKeystrokeMgr,reinterpret_cast<void**>(&km));
-  if(SUCCEEDED(hr)){hr=km->AdviseKeyEventSink(client,this,TRUE);keyAdvised=SUCCEEDED(hr);km->Release();}
+  if(SUCCEEDED(hr)){hr=km->AdviseKeyEventSink(client,this,TRUE);TraceActivation(L"AdviseKeyEventSink",hr);keyAdvised=SUCCEEDED(hr);km->Release();}
   if(FAILED(hr)){Deactivate();return hr;}
   ITfSource* source=nullptr;hr=manager->QueryInterface(IID_ITfSource,reinterpret_cast<void**>(&source));
   if(SUCCEEDED(hr)){
    hr=source->AdviseSink(IID_ITfThreadMgrEventSink,static_cast<ITfThreadMgrEventSink*>(this),&threadCookie);
+   TraceActivation(L"ThreadMgrEventSink",hr);
    if(SUCCEEDED(hr))hr=source->AdviseSink(IID_ITfThreadFocusSink,static_cast<ITfThreadFocusSink*>(this),&focusCookie);
+   TraceActivation(L"ThreadFocusSink",hr);
    if(SUCCEEDED(hr))hr=source->AdviseSink(IID_ITfInputProcessorProfileActivationSink,static_cast<ITfInputProcessorProfileActivationSink*>(this),&profileCookie);
+   TraceActivation(L"ProfileActivationSink",hr);
    if(SUCCEEDED(hr))hr=source->AdviseSink(IID_ITfActiveLanguageProfileNotifySink,static_cast<ITfActiveLanguageProfileNotifySink*>(this),&languageCookie);
+   TraceActivation(L"ActiveLanguageProfileNotifySink",hr);
    source->Release();}
   if(FAILED(hr)){Deactivate();return hr;}
   hr=manager->QueryInterface(IID_ITfLangBarItemMgr,reinterpret_cast<void**>(&langBar));
-  if(SUCCEEDED(hr)){inputMode=new InputModeItem;hr=langBar->AddItem(inputMode);}
+  if(SUCCEEDED(hr)){inputMode=new InputModeItem;hr=langBar->AddItem(inputMode);TraceActivation(L"LanguageBar AddItem",hr);}
   if(FAILED(hr)){Deactivate();return hr;}inputMode->Refresh();return S_OK;
  }
  HRESULT STDMETHODCALLTYPE Deactivate() override{
+  TraceActivation(L"Deactivate",S_OK);
   live.Stop();if(resultWindow){DestroyWindow(resultWindow);resultWindow=nullptr;}
   std::wstring resultClass=std::wstring(L"HanBonGo.CandidateResults.")+kSourceVersion;UnregisterClassW(resultClass.c_str(),module);
   if(langBar&&inputMode)langBar->RemoveItem(inputMode);
@@ -267,10 +286,11 @@ public:
   }
   range->Release();if(SUCCEEDED(hr)){if(finish)Hide();else Show();}return hr;
  }
- HRESULT STDMETHODCALLTYPE OnSetFocus(BOOL yes) override{keyForeground=yes!=FALSE;focused=yes!=FALSE;if(!yes)FinishFocus();else if(inputMode)inputMode->SetActive(true);return S_OK;}
+ HRESULT STDMETHODCALLTYPE OnSetFocus(BOOL yes) override{TraceActivation(yes?L"Key focus gained":L"Key focus lost",S_OK);keyForeground=yes!=FALSE;focused=yes!=FALSE;if(!yes)FinishFocus();else if(inputMode)inputMode->SetActive(true);return S_OK;}
  HRESULT STDMETHODCALLTYPE OnSetThreadFocus() override{focused=true;if(inputMode)inputMode->Refresh();return S_OK;}
  HRESULT STDMETHODCALLTYPE OnKillThreadFocus() override{focused=false;FinishFocus();return S_OK;}
  HRESULT STDMETHODCALLTYPE OnActivated(DWORD type,LANGID,REFCLSID clsid,REFGUID category,REFGUID profile,HKL,DWORD flags) override{
+  TraceActivation(clsid==kService?L"Own profile notification":L"Other profile notification",static_cast<HRESULT>(flags));
   if(category!=GUID_TFCAT_TIP_KEYBOARD)return S_OK;
   if(flags&TF_IPSINK_FLAG_ACTIVE){
    if(type==TF_PROFILETYPE_INPUTPROCESSOR&&clsid==kService&&profile==kProfile){if(inputMode)inputMode->SetActive(true);}
@@ -278,6 +298,7 @@ public:
   }else if(clsid==kService&&profile==kProfile){keyForeground=false;if(inputMode)inputMode->SetActive(false);FinishFocus();}return S_OK;
  }
  HRESULT STDMETHODCALLTYPE OnActivated(REFCLSID clsid,REFGUID profile,BOOL yes) override{
+  TraceActivation(clsid==kService?L"Own language notification":L"Other language notification",static_cast<HRESULT>(yes));
   if(clsid==kService&&profile==kProfile){if(inputMode)inputMode->SetActive(yes!=FALSE);if(!yes){keyForeground=false;FinishFocus();}}return S_OK;
  }
  HRESULT STDMETHODCALLTYPE OnTestKeyDown(ITfContext*,WPARAM k,LPARAM,BOOL* eaten) override{
@@ -292,38 +313,41 @@ public:
   UINT k=static_cast<UINT>(key);*eaten=FALSE;
   if(!keyForeground||!IsHanBonGoActive())return S_OK;
   if(!Wants(k)){if(!keys.empty())Finish(c);return S_OK;}
-  auto oldKeys=keys;auto oldCandidates=candidates;auto oldSelected=selected;auto oldMode=candidateMode;bool oldReady=dictionaryReady;HRESULT hr=S_OK;bool schedule=false;
-  if(k==VK_RETURN)hr=Finish(c);
+  auto oldKeys=keys;auto oldCandidates=candidates;auto oldSelected=selected;auto oldMode=candidateMode;auto oldApplied=appliedConversion;bool oldReady=dictionaryReady;HRESULT hr=S_OK;bool schedule=false;
+  if(k==VK_RETURN)hr=Finish(c,false,true);
   else if(k==VK_ESCAPE){
-   live.Cancel();if(candidateMode!=CandidateMode::Hidden){candidates.clear();selected=0;candidateMode=CandidateMode::Hidden;dictionaryReady=false;hr=Request(c,hj::Reading(hj::Compose(keys)),false);}else hr=Finish(c,true);
+   live.Cancel();if(candidateMode!=CandidateMode::Hidden){candidates.clear();selected=0;candidateMode=CandidateMode::Hidden;appliedConversion.clear();dictionaryReady=false;hr=Request(c,hj::Reading(hj::Compose(keys)),false);}else hr=Finish(c,true);
   }
   else if(k==VK_BACK){
    live.Cancel();keys.pop_back();if(keys.empty()){candidates.clear();candidateMode=CandidateMode::Hidden;hr=Request(c,L"",true);if(SUCCEEDED(hr))Reset();}
    else {Preview();hr=Request(c,hj::Reading(hj::Compose(keys)),false);schedule=true;}
   }
   else if(k==VK_SPACE){
-   live.Cancel();if(candidateMode!=CandidateMode::Converted){
+   live.Cancel();if(candidateMode==CandidateMode::Browsing){
+    // Space applies the row the user is browsing; arrows alone never do.
+    candidateMode=CandidateMode::Converted;dictionaryReady=true;
+   }else if(candidateMode!=CandidateMode::Converted){
     // Conversion is explicit. A preview never silently changes document text.
     if(!dictionaryReady)candidates=engine.Convert(hj::Reading(hj::Compose(keys)));
     selected=0;candidateMode=CandidateMode::Converted;dictionaryReady=true;
-   }else selected=(selected+1)%candidates.size();hr=Request(c,candidates[selected],false);
+   }else selected=(selected+1)%candidates.size();appliedConversion=candidates[selected];hr=Request(c,appliedConversion,false);
   }
   else if(k==VK_OEM_MINUS){
-   if(candidateMode==CandidateMode::Converted){hr=Finish(c);if(FAILED(hr))return S_OK;}
+   if(!appliedConversion.empty()){hr=Finish(c);if(FAILED(hr))return S_OK;}
    if(keys.size()>=256){*eaten=TRUE;return S_OK;}keys+=L'-';Preview();hr=Request(c,hj::Reading(hj::Compose(keys)),false);schedule=true;
   }
-  else if(!candidates.empty()&&(k>='1'&&k<='9')){size_t index=(selected/9)*9+k-'1';if(index<candidates.size()){live.Cancel();candidateMode=CandidateMode::Converted;selected=index;hr=Finish(c);}}
+  else if(!candidates.empty()&&(k>='1'&&k<='9')){size_t index=(selected/9)*9+k-'1';if(index<candidates.size()){live.Cancel();candidateMode=CandidateMode::Browsing;selected=index;hr=Finish(c,false,true);}}
   else if(!candidates.empty()&&(k==VK_UP||k==VK_LEFT||k==VK_DOWN||k==VK_RIGHT||k==VK_PRIOR||k==VK_NEXT)){
-   live.Cancel();candidateMode=CandidateMode::Converted;
+   live.Cancel();bool unselected=candidateMode==CandidateMode::Preview;candidateMode=CandidateMode::Browsing;
    int step=(k==VK_PRIOR||k==VK_NEXT)?9:1;int dir=(k==VK_UP||k==VK_LEFT||k==VK_PRIOR)?-1:1;
-   selected=static_cast<size_t>((static_cast<int>(selected)+dir*step+static_cast<int>(candidates.size())*9)%static_cast<int>(candidates.size()));hr=Request(c,candidates[selected],false);
-  }else if(k==VK_F6||k==VK_F7){live.Cancel();candidateMode=CandidateMode::Converted;dictionaryReady=true;candidates={k==VK_F7?hj::Katakana(hj::Reading(hj::Compose(keys))):hj::Reading(hj::Compose(keys))};selected=0;hr=Request(c,candidates[0],false);}
+   selected=unselected?(dir>0?0:candidates.size()-1):static_cast<size_t>((static_cast<int>(selected)+dir*step+static_cast<int>(candidates.size())*9)%static_cast<int>(candidates.size()));Show();
+  }else if(k==VK_F6||k==VK_F7){live.Cancel();candidateMode=CandidateMode::Converted;dictionaryReady=true;candidates={k==VK_F7?hj::Katakana(hj::Reading(hj::Compose(keys))):hj::Reading(hj::Compose(keys))};selected=0;appliedConversion=candidates[0];hr=Request(c,appliedConversion,false);}
   else if(auto j=hj::KeyJamo(k,(GetKeyState(VK_SHIFT)&0x8000)!=0)){
-   if(candidateMode==CandidateMode::Converted){hr=Finish(c);if(FAILED(hr))return S_OK;}
+   if(!appliedConversion.empty()){hr=Finish(c);if(FAILED(hr))return S_OK;}
    if(keys.size()>=256){*eaten=TRUE;return S_OK;}keys+=j;Preview();hr=Request(c,hj::Reading(hj::Compose(keys)),false);schedule=true;
   }
   if(SUCCEEDED(hr)){*eaten=TRUE;if(schedule)SchedulePreview();}
-  else {keys=std::move(oldKeys);candidates=std::move(oldCandidates);selected=oldSelected;candidateMode=oldMode;dictionaryReady=oldReady;Show();if(candidateMode==CandidateMode::Preview)SchedulePreview();}return S_OK;
+  else {keys=std::move(oldKeys);candidates=std::move(oldCandidates);selected=oldSelected;candidateMode=oldMode;appliedConversion=std::move(oldApplied);dictionaryReady=oldReady;Show();if(candidateMode==CandidateMode::Preview)SchedulePreview();}return S_OK;
  }
  HRESULT STDMETHODCALLTYPE OnCompositionTerminated(TfEditCookie,ITfComposition* comp) override{if(comp==composition){SafeRelease(composition);SafeRelease(compositionContext);Reset();}return S_OK;}
  HRESULT STDMETHODCALLTYPE OnInitDocumentMgr(ITfDocumentMgr*) override{return S_OK;}
@@ -351,7 +375,11 @@ extern "C" HRESULT WINAPI DllGetClassObject(REFCLSID cls,REFIID id,void** p){if(
 static std::wstring ClassKey(){wchar_t guid[40];StringFromGUID2(kService,guid,40);return std::wstring(L"Software\\Classes\\CLSID\\")+guid;}
 extern "C" HRESULT WINAPI DllRegisterServer(){
  wchar_t path[32768];DWORD length=GetModuleFileNameW(module,path,32768);if(!length||length>=32768)return E_FAIL;
- HKEY key=nullptr;std::wstring cls=ClassKey();LSTATUS error=RegCreateKeyExW(HKEY_LOCAL_MACHINE,(cls+L"\\InprocServer32").c_str(),0,nullptr,0,KEY_WRITE,nullptr,&key,nullptr);
+ HKEY key=nullptr;std::wstring cls=ClassKey();LSTATUS error=RegCreateKeyExW(HKEY_LOCAL_MACHINE,cls.c_str(),0,nullptr,0,KEY_WRITE,nullptr,&key,nullptr);
+ if(error!=ERROR_SUCCESS)return HRESULT_FROM_WIN32(error);
+ error=RegSetValueExW(key,nullptr,0,REG_SZ,reinterpret_cast<const BYTE*>(kName),static_cast<DWORD>((wcslen(kName)+1)*sizeof(wchar_t)));RegCloseKey(key);
+ if(error!=ERROR_SUCCESS)return HRESULT_FROM_WIN32(error);
+ error=RegCreateKeyExW(HKEY_LOCAL_MACHINE,(cls+L"\\InprocServer32").c_str(),0,nullptr,0,KEY_WRITE,nullptr,&key,nullptr);
  if(error!=ERROR_SUCCESS)return HRESULT_FROM_WIN32(error);
  error=RegSetValueExW(key,nullptr,0,REG_SZ,reinterpret_cast<const BYTE*>(path),(length+1)*sizeof(wchar_t));
  if(error==ERROR_SUCCESS)error=RegSetValueExW(key,L"ThreadingModel",0,REG_SZ,reinterpret_cast<const BYTE*>(L"Apartment"),sizeof(L"Apartment"));RegCloseKey(key);
@@ -360,14 +388,14 @@ extern "C" HRESULT WINAPI DllRegisterServer(){
  ITfInputProcessorProfileMgr* profiles=nullptr;HRESULT hr=CoCreateInstance(CLSID_TF_InputProcessorProfiles,nullptr,CLSCTX_INPROC_SERVER,IID_ITfInputProcessorProfileMgr,reinterpret_cast<void**>(&profiles));
  if(SUCCEEDED(hr)){hr=profiles->RegisterProfile(kService,0x0411,kProfile,kName,static_cast<ULONG>(wcslen(kName)),path,length,static_cast<ULONG>(-101),nullptr,0,TRUE,0);profiles->Release();}
  ITfCategoryMgr* categories=nullptr;if(SUCCEEDED(hr))hr=CoCreateInstance(CLSID_TF_CategoryMgr,nullptr,CLSCTX_INPROC_SERVER,IID_ITfCategoryMgr,reinterpret_cast<void**>(&categories));
- if(SUCCEEDED(hr)){hr=categories->RegisterCategory(kService,GUID_TFCAT_TIP_KEYBOARD,kService);if(SUCCEEDED(hr))hr=categories->RegisterCategory(kService,GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,kService);if(SUCCEEDED(hr))hr=categories->RegisterCategory(kService,GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,kService);categories->Release();}
+ if(SUCCEEDED(hr)){hr=categories->RegisterCategory(kService,GUID_TFCAT_TIP_KEYBOARD,kService);if(SUCCEEDED(hr))hr=categories->RegisterCategory(kService,GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,kService);if(SUCCEEDED(hr))hr=categories->RegisterCategory(kService,GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,kService);if(SUCCEEDED(hr))hr=categories->RegisterCategory(kService,GUID_TFCAT_TIPCAP_COMLESS,kService);categories->Release();}
  if(SUCCEEDED(init))CoUninitialize();if(FAILED(hr))RegDeleteTreeW(HKEY_LOCAL_MACHINE,cls.c_str());return hr;
 }
 extern "C" HRESULT WINAPI DllUnregisterServer(){
  HRESULT init=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);if(FAILED(init)&&init!=RPC_E_CHANGED_MODE)return init;
- HRESULT result=S_OK;ITfInputProcessorProfiles* p=nullptr;HRESULT hr=CoCreateInstance(CLSID_TF_InputProcessorProfiles,nullptr,CLSCTX_INPROC_SERVER,IID_ITfInputProcessorProfiles,reinterpret_cast<void**>(&p));
- if(SUCCEEDED(hr)){hr=p->RemoveLanguageProfile(kService,0x0411,kProfile);if(FAILED(hr))result=hr;hr=p->Unregister(kService);if(FAILED(hr))result=hr;p->Release();}else result=hr;
- ITfCategoryMgr* c=nullptr;if(SUCCEEDED(CoCreateInstance(CLSID_TF_CategoryMgr,nullptr,CLSCTX_INPROC_SERVER,IID_ITfCategoryMgr,reinterpret_cast<void**>(&c)))){c->UnregisterCategory(kService,GUID_TFCAT_TIP_KEYBOARD,kService);c->UnregisterCategory(kService,GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,kService);c->UnregisterCategory(kService,GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,kService);c->Release();}
+ HRESULT result=S_OK;ITfInputProcessorProfileMgr* p=nullptr;HRESULT hr=CoCreateInstance(CLSID_TF_InputProcessorProfiles,nullptr,CLSCTX_INPROC_SERVER,IID_ITfInputProcessorProfileMgr,reinterpret_cast<void**>(&p));
+ if(SUCCEEDED(hr)){hr=p->UnregisterProfile(kService,0x0411,kProfile,0);if(FAILED(hr))result=hr;p->Release();}else result=hr;
+ ITfCategoryMgr* c=nullptr;if(SUCCEEDED(CoCreateInstance(CLSID_TF_CategoryMgr,nullptr,CLSCTX_INPROC_SERVER,IID_ITfCategoryMgr,reinterpret_cast<void**>(&c)))){c->UnregisterCategory(kService,GUID_TFCAT_TIP_KEYBOARD,kService);c->UnregisterCategory(kService,GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,kService);c->UnregisterCategory(kService,GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,kService);c->UnregisterCategory(kService,GUID_TFCAT_TIPCAP_COMLESS,kService);c->Release();}
  LSTATUS error=RegDeleteTreeW(HKEY_LOCAL_MACHINE,ClassKey().c_str());if(error!=ERROR_SUCCESS&&error!=ERROR_FILE_NOT_FOUND)result=HRESULT_FROM_WIN32(error);
  if(SUCCEEDED(init))CoUninitialize();return result;
 }

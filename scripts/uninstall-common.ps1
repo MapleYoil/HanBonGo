@@ -1,5 +1,5 @@
 function Test-HanBonGoInputTip([AllowEmptyString()][string]$InputTip) {
-    return $InputTip -match '(?i)^0411:\{7b3b1841-a842-4bc5-[a-f0-9]{4}-[a-f0-9]{12}\}\{e97a77be-9c2d-4e9d-81ad-6a2f76d9ab25\}$'
+    return $InputTip -match '(?i)^0411:\{7b3b1841-a842-4bc5-[a-f0-9]{4}-[a-f0-9]{12}\}\{e97a77be-9c2d-4e9d-[a-f0-9]{4}-[a-f0-9]{12}\}$'
 }
 
 function Assert-HanBonGoVersionPath([string]$InstallRoot, [string]$VersionRoot) {
